@@ -28,8 +28,20 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## xAI Grok Build GrokNight palette
+## xAI Grok Build terminal UI
 
-The terminal color constants in `src/tui.rs` are adapted from Grok Build's
-GrokNight palette at commit `bb7f39d`, copyright xAI, under the Apache License
-2.0: <https://github.com/xai-org/grok-build/blob/bb7f39d/LICENSE>.
+The terminal color constants, flat transcript, prompt chrome, status rail, agent
+status icons, and roster interaction patterns in `src/tui.rs` are adapted from
+Grok Build at commit `bb7f39d5858cbf5e00de639367f59debbdcb0138`, copyright
+2023-2026 SpaceXAI, under the Apache License 2.0:
+`LICENSES/GROK-BUILD-APACHE-2.0.txt`.
+
+SERAPH changes the product identity, backend, data model, composer shortcuts,
+agent roster, and layout to integrate Codex and Prime-style navigation.
+
+## Prime Agent multi-agent navigation
+
+The down-arrow All Agents entry point and current-project/other-project visual
+split in `src/tui.rs` are adapted from Prime Agent's Agents View at commit
+`4e42fab2ce0c486cd6da0237b56b9b7787d06bfd`, copyright 2025 Mario
+Zechner and 2026 Prime Intellect, under the MIT License reproduced above.

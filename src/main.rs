@@ -144,7 +144,7 @@ async fn run_headless_agent(prompt: &str) -> Result<()> {
         kernel: None,
         task_board: None,
         project: project.clone(),
-        agents: AgentManager::new(project)?,
+        agents: AgentManager::new(project, None)?,
     };
     let result = run_headless_turn(&mut codex, &mut tools, &thread_id, prompt).await;
     tools.shutdown().await?;
@@ -228,7 +228,7 @@ async fn run_controller(
         kernel: None,
         task_board: None,
         project: cwd.clone(),
-        agents: AgentManager::new(cwd.clone())?,
+        agents: AgentManager::new(cwd.clone(), Some(events.clone()))?,
     };
     events.send(UiEvent::Ready(thread.is_some())).await?;
 
