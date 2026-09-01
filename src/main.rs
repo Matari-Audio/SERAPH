@@ -1022,8 +1022,8 @@ fn execute_edit(host: &mut ToolHost, arguments: &Value) -> Result<String> {
         .map(|edit| {
             json!({
                 "path": edit.target.strip_prefix(&project).unwrap_or(&edit.target),
-                "before_bytes": edit.expected.len(),
-                "after_bytes": edit.next.len(),
+                "before_bytes": edit.expected.byte_len(),
+                "after_bytes": edit.next.byte_len(),
             })
         })
         .collect();

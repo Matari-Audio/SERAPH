@@ -19,6 +19,8 @@ use rusqlite::{Connection, TransactionBehavior};
 
 const BEGIN: &str = "*** Begin Patch";
 const END: &str = "*** End Patch";
+const ADD: &str = "*** Add File: ";
+const DELETE: &str = "*** Delete File: ";
 const UPDATE: &str = "*** Update File: ";
 const MOVE: &str = "*** Move to: ";
 const EOF: &str = "*** End of File";
@@ -26,10 +28,29 @@ const BOM: &[u8] = b"\xef\xbb\xbf";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileState {
+    Missing,
+    Present {
+        bytes: Vec<u8>,
+        /// `None` requests platform-default permissions for a new file.
+        permissions: Option<fs::Permissions>,
+    },
+}
+
+impl FileState {
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Missing => 0,
+            Self::Present { bytes, .. } => bytes.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedEdit {
     pub target: PathBuf,
-    pub expected: Vec<u8>,
-    pub next: Vec<u8>,
+    pub expected: FileState,
+    pub next: FileState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +71,11 @@ struct StagedFile {
 }
 
 impl StagedFile {
-    fn create(target: &Path, contents: &[u8], permissions: fs::Permissions) -> Result<Self> {
+    fn create(
+        target: &Path,
+        contents: &[u8],
+        permissions: Option<fs::Permissions>,
+    ) -> Result<Self> {
         let parent = target
             .parent()
             .with_context(|| format!("{} has no parent directory", target.display()))?;
@@ -72,9 +97,11 @@ impl StagedFile {
                     let staged = Self { path: Some(path) };
                     file.write_all(contents)
                         .with_context(|| format!("stage edit for {}", target.display()))?;
-                    file.set_permissions(permissions).with_context(|| {
-                        format!("preserve permissions for {}", target.display())
-                    })?;
+                    if let Some(permissions) = permissions {
+                        file.set_permissions(permissions).with_context(|| {
+                            format!("preserve permissions for {}", target.display())
+                        })?;
+                    }
                     file.sync_all()
                         .with_context(|| format!("sync staged edit for {}", target.display()))?;
                     return Ok(staged);
@@ -96,6 +123,19 @@ impl StagedFile {
         self.path = None;
         Ok(())
     }
+
+    fn create_target(&self, target: &Path) -> Result<()> {
+        let path = self.path.as_ref().context("staged edit is unavailable")?;
+        fs::hard_link(path, target)
+            .with_context(|| format!("atomically create {}", target.display()))
+    }
+
+    fn permissions(&self) -> Result<fs::Permissions> {
+        let path = self.path.as_ref().context("staged edit is unavailable")?;
+        Ok(fs::metadata(path)
+            .with_context(|| format!("inspect staged edit {}", path.display()))?
+            .permissions())
+    }
 }
 
 impl Drop for StagedFile {
@@ -106,10 +146,12 @@ impl Drop for StagedFile {
     }
 }
 
-struct StagedEdit<'a> {
-    edit: &'a PreparedEdit,
-    forward: StagedFile,
-    rollback: StagedFile,
+struct StagedEdit {
+    target: PathBuf,
+    expected: FileState,
+    next: FileState,
+    forward: Option<StagedFile>,
+    rollback: Option<StagedFile>,
 }
 
 /// Applies prepared edits through same-directory atomic replacements.
@@ -134,19 +176,31 @@ pub fn apply_prepared_edits(project: &Path, edits: &[PreparedEdit]) -> Result<Ap
             "edit targets {} more than once",
             edit.target.display()
         );
+        validate_transition(edit)?;
         ensure!(edit.expected != edit.next, "edit leaves target unchanged");
-        let permissions = verify_expected(&project, edit)?;
+        verify_state(&project, &edit.target, &edit.expected)?;
+        let (forward, next) = stage_state(&edit.target, &edit.next)?;
+        let (rollback, expected) = stage_state(&edit.target, &edit.expected)?;
         staged.push(StagedEdit {
-            edit,
-            forward: StagedFile::create(&edit.target, &edit.next, permissions.clone())?,
-            rollback: StagedFile::create(&edit.target, &edit.expected, permissions)?,
+            target: edit.target.clone(),
+            expected,
+            next,
+            forward,
+            rollback,
         });
     }
 
     for index in 0..staged.len() {
         let staged_edit = &mut staged[index];
-        let result = verify_expected(&project, staged_edit.edit)
-            .and_then(|_| staged_edit.forward.replace(&staged_edit.edit.target));
+        let result =
+            verify_state(&project, &staged_edit.target, &staged_edit.expected).and_then(|_| {
+                commit_state(
+                    &staged_edit.target,
+                    &staged_edit.expected,
+                    &staged_edit.next,
+                    &mut staged_edit.forward,
+                )
+            });
         if let Err(error) = result {
             let rollback = rollback_committed(&project, &mut staged[..index]);
             return match rollback {
@@ -160,35 +214,67 @@ pub fn apply_prepared_edits(project: &Path, edits: &[PreparedEdit]) -> Result<Ap
 
     Ok(AppliedPatch {
         project,
-        inverse: edits
+        inverse: staged
             .iter()
-            .map(|edit| PreparedEdit {
-                target: edit.target.clone(),
-                expected: edit.next.clone(),
-                next: edit.expected.clone(),
+            .rev()
+            .map(|staged| PreparedEdit {
+                target: staged.target.clone(),
+                expected: staged.next.clone(),
+                next: staged.expected.clone(),
             })
             .collect(),
     })
 }
 
-fn rollback_committed(project: &Path, staged: &mut [StagedEdit<'_>]) -> Result<()> {
+fn validate_transition(edit: &PreparedEdit) -> Result<()> {
+    match (&edit.expected, &edit.next) {
+        (FileState::Missing, FileState::Present { .. }) => Ok(()),
+        (
+            FileState::Present {
+                permissions: Some(_),
+                ..
+            },
+            FileState::Missing
+            | FileState::Present {
+                permissions: Some(_),
+                ..
+            },
+        ) => Ok(()),
+        (FileState::Missing, FileState::Missing) => bail!("edit leaves target missing"),
+        (
+            FileState::Present {
+                permissions: Some(_),
+                ..
+            },
+            FileState::Present { .. },
+        ) => bail!("replacement file state lacks permissions"),
+        (FileState::Present { .. }, _) => bail!("existing file state lacks permissions"),
+    }
+}
+
+fn rollback_committed(project: &Path, staged: &mut [StagedEdit]) -> Result<()> {
     let mut failures = Vec::new();
     for staged in staged.iter_mut().rev() {
-        let inverse = PreparedEdit {
-            target: staged.edit.target.clone(),
-            expected: staged.edit.next.clone(),
-            next: staged.edit.expected.clone(),
-        };
-        if let Err(error) = verify_expected(project, &inverse)
-            .and_then(|_| staged.rollback.replace(&staged.edit.target))
-        {
-            let recovery = staged.rollback.path.take().map_or_else(
-                || "recovery artifact unavailable".to_owned(),
-                |path| format!("exact recovery bytes retained at {}", path.display()),
-            );
+        let result = verify_state(project, &staged.target, &staged.next).and_then(|_| {
+            commit_state(
+                &staged.target,
+                &staged.next,
+                &staged.expected,
+                &mut staged.rollback,
+            )
+        });
+        if let Err(error) = result {
+            let recovery = staged
+                .rollback
+                .as_mut()
+                .and_then(|file| file.path.take())
+                .map_or_else(
+                    || format!("manual recovery required for {}", staged.target.display()),
+                    |path| format!("exact recovery bytes retained at {}", path.display()),
+                );
             failures.push(format!(
                 "{}: {error:#}; {recovery}",
-                staged.edit.target.display()
+                staged.target.display()
             ));
         }
     }
@@ -200,23 +286,80 @@ fn rollback_committed(project: &Path, staged: &mut [StagedEdit<'_>]) -> Result<(
     Ok(())
 }
 
-fn verify_expected(project: &Path, edit: &PreparedEdit) -> Result<fs::Permissions> {
+fn stage_state(target: &Path, state: &FileState) -> Result<(Option<StagedFile>, FileState)> {
+    match state {
+        FileState::Missing => Ok((None, FileState::Missing)),
+        FileState::Present { bytes, permissions } => {
+            let staged = StagedFile::create(target, bytes, permissions.clone())?;
+            let permissions = staged.permissions()?;
+            Ok((
+                Some(staged),
+                FileState::Present {
+                    bytes: bytes.clone(),
+                    permissions: Some(permissions),
+                },
+            ))
+        }
+    }
+}
+
+fn commit_state(
+    target: &Path,
+    expected: &FileState,
+    next: &FileState,
+    staged: &mut Option<StagedFile>,
+) -> Result<()> {
+    match (expected, next) {
+        (FileState::Missing, FileState::Present { .. }) => staged
+            .as_ref()
+            .context("new file was not staged")?
+            .create_target(target),
+        (FileState::Present { .. }, FileState::Missing) => fs::remove_file(target)
+            .with_context(|| format!("atomically delete {}", target.display())),
+        (FileState::Present { .. }, FileState::Present { .. }) => staged
+            .as_mut()
+            .context("replacement file was not staged")?
+            .replace(target),
+        (FileState::Missing, FileState::Missing) => bail!("edit leaves target missing"),
+    }
+}
+
+fn verify_state(project: &Path, target: &Path, expected: &FileState) -> Result<()> {
     ensure!(
-        edit.target.starts_with(project),
+        target.starts_with(project),
         "edit target is outside project root: {}",
-        edit.target.display()
+        target.display()
     );
-    let metadata = inspect_regular_path(&edit.target)?;
-    let actual = fs::read(&edit.target)
-        .with_context(|| format!("read edit target {}", edit.target.display()))?;
-    ensure!(
-        actual == edit.expected,
-        "edit target changed concurrently: {}",
-        edit.target.display()
-    );
-    inspect_regular_path(&edit.target)
-        .with_context(|| format!("reinspect edit target {}", edit.target.display()))?;
-    Ok(metadata.permissions())
+    match expected {
+        FileState::Missing => inspect_missing_path(target),
+        FileState::Present { bytes, permissions } => {
+            let metadata = inspect_regular_path(target)?;
+            let actual = fs::read(target)
+                .with_context(|| format!("read edit target {}", target.display()))?;
+            ensure!(
+                actual == *bytes,
+                "edit target changed concurrently: {}",
+                target.display()
+            );
+            if let Some(permissions) = permissions {
+                ensure!(
+                    metadata.permissions() == *permissions,
+                    "edit target permissions changed concurrently: {}",
+                    target.display()
+                );
+            }
+            let after = inspect_regular_path(target)
+                .with_context(|| format!("reinspect edit target {}", target.display()))?;
+            if let Some(permissions) = permissions {
+                ensure!(
+                    after.permissions() == *permissions,
+                    "edit target permissions changed concurrently: {}",
+                    target.display()
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 fn open_workspace_database(project: &Path) -> Result<Connection> {
@@ -249,7 +392,40 @@ fn open_workspace_database(project: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+fn inspect_missing_path(target: &Path) -> Result<()> {
+    let parent = target
+        .parent()
+        .context("missing edit target has no parent directory")?;
+    ensure!(
+        target.file_name().is_some(),
+        "missing edit target has no name"
+    );
+    let metadata = inspect_symlink_free_path(parent)?;
+    ensure!(
+        metadata.is_dir(),
+        "edit target parent is not a directory: {}",
+        parent.display()
+    );
+    match fs::symlink_metadata(target) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => bail!("edit target already exists: {}", target.display()),
+        Err(error) => {
+            Err(error).with_context(|| format!("inspect edit target {}", target.display()))
+        }
+    }
+}
+
 fn inspect_regular_path(target: &Path) -> Result<fs::Metadata> {
+    let metadata = inspect_symlink_free_path(target)?;
+    ensure!(
+        metadata.is_file(),
+        "edit target is not a regular file: {}",
+        target.display()
+    );
+    Ok(metadata)
+}
+
+fn inspect_symlink_free_path(target: &Path) -> Result<fs::Metadata> {
     ensure!(
         target.is_absolute(),
         "edit target must be absolute: {}",
@@ -276,19 +452,14 @@ fn inspect_regular_path(target: &Path) -> Result<fs::Metadata> {
             }
         }
     }
-    let metadata = metadata.context("edit target has no file component")?;
-    ensure!(
-        metadata.is_file(),
-        "edit target is not a regular file: {}",
-        target.display()
-    );
-    Ok(metadata)
+    metadata.context("edit target has no file component")
 }
 
 #[derive(Debug)]
-struct UpdateFile {
-    path: PathBuf,
-    chunks: Vec<Chunk>,
+enum PatchHunk {
+    Add { path: PathBuf, bytes: Vec<u8> },
+    Delete { path: PathBuf },
+    Update { path: PathBuf, chunks: Vec<Chunk> },
 }
 
 #[derive(Debug, Default)]
@@ -319,50 +490,90 @@ enum Ending {
     None,
 }
 
-/// Parses and derives every update before any caller writes a byte.
+/// Parses and derives every transition before any caller writes a target byte.
 ///
-/// V0 deliberately rejects add/delete/move hunks, fuzzy matches, duplicate
-/// targets, symlinks, invalid UTF-8, and ambiguous exact matches.
+/// V0 deliberately rejects moves, overwrites, missing parent directories,
+/// fuzzy matches, duplicate targets, symlinks, and ambiguous exact matches.
 pub fn prepare_exact_patch(root: &Path, patch: &str) -> Result<Vec<PreparedEdit>> {
     let root = fs::canonicalize(root).context("resolve patch root")?;
-    let updates = parse(patch)?;
+    let hunks = parse(patch)?;
     let mut targets = BTreeSet::new();
-    let mut prepared = Vec::with_capacity(updates.len());
+    let mut prepared = Vec::with_capacity(hunks.len());
 
-    for update in updates {
-        let target = resolve_target(&root, &update.path)?;
+    for hunk in hunks {
+        let path = match &hunk {
+            PatchHunk::Add { path, .. }
+            | PatchHunk::Delete { path }
+            | PatchHunk::Update { path, .. } => path,
+        }
+        .clone();
+        let target = match &hunk {
+            PatchHunk::Add { .. } => resolve_target(&root, &path, false)?,
+            PatchHunk::Delete { .. } | PatchHunk::Update { .. } => {
+                resolve_target(&root, &path, true)?
+            }
+        };
         ensure!(
             targets.insert(target.clone()),
             "patch targets {} more than once",
-            update.path.display()
+            path.display()
         );
-        let expected = fs::read(&target)
-            .with_context(|| format!("read patch target {}", update.path.display()))?;
-        let (bom, body) = expected
-            .strip_prefix(BOM)
-            .map_or((&[][..], expected.as_slice()), |body| (BOM, body));
-        let source = str::from_utf8(body)
-            .with_context(|| format!("{} is not UTF-8", update.path.display()))?;
-        let mut lines = split_source(source);
-        apply_chunks(&mut lines, &update.chunks, &update.path)?;
-        let mut next = Vec::with_capacity(expected.len());
-        next.extend_from_slice(bom);
-        render_source(&lines, &mut next);
-        ensure!(
-            next != expected,
-            "patch leaves {} unchanged",
-            update.path.display()
-        );
-        prepared.push(PreparedEdit {
-            target,
-            expected,
-            next,
+        prepared.push(match hunk {
+            PatchHunk::Add { bytes, .. } => PreparedEdit {
+                target,
+                expected: FileState::Missing,
+                next: FileState::Present {
+                    bytes,
+                    permissions: None,
+                },
+            },
+            PatchHunk::Delete { .. } => PreparedEdit {
+                expected: read_present_state(&target, &path)?,
+                target,
+                next: FileState::Missing,
+            },
+            PatchHunk::Update { chunks, .. } => {
+                let expected = read_present_state(&target, &path)?;
+                let FileState::Present { bytes, permissions } = &expected else {
+                    unreachable!()
+                };
+                let next_permissions = permissions.clone();
+                let (bom, body) = bytes
+                    .strip_prefix(BOM)
+                    .map_or((&[][..], bytes.as_slice()), |body| (BOM, body));
+                let source = str::from_utf8(body)
+                    .with_context(|| format!("{} is not UTF-8", path.display()))?;
+                let mut lines = split_source(source);
+                apply_chunks(&mut lines, &chunks, &path)?;
+                let mut next = Vec::with_capacity(bytes.len());
+                next.extend_from_slice(bom);
+                render_source(&lines, &mut next);
+                ensure!(next != *bytes, "patch leaves {} unchanged", path.display());
+                PreparedEdit {
+                    target,
+                    expected,
+                    next: FileState::Present {
+                        bytes: next,
+                        permissions: next_permissions,
+                    },
+                }
+            }
         });
     }
     Ok(prepared)
 }
 
-fn parse(patch: &str) -> Result<Vec<UpdateFile>> {
+fn read_present_state(target: &Path, display_path: &Path) -> Result<FileState> {
+    let permissions = inspect_regular_path(target)?.permissions();
+    let bytes = fs::read(target)
+        .with_context(|| format!("read patch target {}", display_path.display()))?;
+    Ok(FileState::Present {
+        bytes,
+        permissions: Some(permissions),
+    })
+}
+
+fn parse(patch: &str) -> Result<Vec<PatchHunk>> {
     let lines: Vec<_> = patch
         .split_terminator('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
@@ -373,10 +584,43 @@ fn parse(patch: &str) -> Result<Vec<UpdateFile>> {
     );
     ensure!(lines.last() == Some(&END), "patch must end with {END:?}");
 
-    let mut updates = Vec::new();
+    let mut hunks = Vec::new();
     let mut index = 1;
     while index + 1 < lines.len() {
         let line_number = index + 1;
+        if lines[index].starts_with(MOVE) {
+            bail!("move hunks are not supported at line {line_number}");
+        }
+        if let Some(path) = lines[index].strip_prefix(ADD) {
+            ensure!(!path.is_empty(), "empty add path at line {line_number}");
+            index += 1;
+            let mut bytes = Vec::new();
+            while index + 1 < lines.len() && !is_hunk_header(lines[index]) {
+                if lines[index].starts_with(MOVE) {
+                    bail!("move hunks are not supported at line {}", index + 1);
+                }
+                let line = lines[index]
+                    .strip_prefix('+')
+                    .with_context(|| format!("add line {} must start with '+'", index + 1))?;
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+                index += 1;
+            }
+            ensure!(!bytes.is_empty(), "add hunk at line {line_number} is empty");
+            hunks.push(PatchHunk::Add {
+                path: PathBuf::from(path),
+                bytes,
+            });
+            continue;
+        }
+        if let Some(path) = lines[index].strip_prefix(DELETE) {
+            ensure!(!path.is_empty(), "empty delete path at line {line_number}");
+            hunks.push(PatchHunk::Delete {
+                path: PathBuf::from(path),
+            });
+            index += 1;
+            continue;
+        }
         let path = lines[index]
             .strip_prefix(UPDATE)
             .with_context(|| format!("unsupported hunk at line {line_number}"))?;
@@ -385,7 +629,7 @@ fn parse(patch: &str) -> Result<Vec<UpdateFile>> {
 
         let mut chunks = Vec::new();
         let mut chunk = Chunk::default();
-        while index + 1 < lines.len() && !lines[index].starts_with(UPDATE) {
+        while index + 1 < lines.len() && !is_hunk_header(lines[index]) {
             let line = lines[index];
             let line_number = index + 1;
             ensure!(
@@ -427,13 +671,17 @@ fn parse(patch: &str) -> Result<Vec<UpdateFile>> {
         }
         validate_chunk(&chunk, index + 1)?;
         chunks.push(chunk);
-        updates.push(UpdateFile {
+        hunks.push(PatchHunk::Update {
             path: PathBuf::from(path),
             chunks,
         });
     }
-    ensure!(!updates.is_empty(), "patch contains no update hunks");
-    Ok(updates)
+    ensure!(!hunks.is_empty(), "patch contains no hunks");
+    Ok(hunks)
+}
+
+fn is_hunk_header(line: &str) -> bool {
+    line.starts_with(ADD) || line.starts_with(DELETE) || line.starts_with(UPDATE)
 }
 
 fn validate_chunk(chunk: &Chunk, line_number: usize) -> Result<()> {
@@ -451,7 +699,7 @@ fn validate_chunk(chunk: &Chunk, line_number: usize) -> Result<()> {
     Ok(())
 }
 
-fn resolve_target(root: &Path, relative: &Path) -> Result<PathBuf> {
+fn resolve_target(root: &Path, relative: &Path, must_exist: bool) -> Result<PathBuf> {
     let parts: Vec<_> = relative.components().collect();
     ensure!(
         !parts.is_empty()
@@ -464,12 +712,27 @@ fn resolve_target(root: &Path, relative: &Path) -> Result<PathBuf> {
     let mut target = root.to_path_buf();
     for (index, part) in parts.iter().enumerate() {
         target.push(part.as_os_str());
-        let metadata = fs::symlink_metadata(&target)
-            .with_context(|| format!("inspect patch target {}", relative.display()))?;
+        let metadata = match fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if !must_exist
+                    && index + 1 == parts.len()
+                    && error.kind() == io::ErrorKind::NotFound =>
+            {
+                return Ok(target);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect patch target {}", relative.display()));
+            }
+        };
         ensure!(
             !metadata.file_type().is_symlink(),
             "patch target crosses a symlink"
         );
+        if !must_exist && index + 1 == parts.len() {
+            bail!("add target already exists: {}", relative.display());
+        }
         ensure!(
             if index + 1 == parts.len() {
                 metadata.is_file()
