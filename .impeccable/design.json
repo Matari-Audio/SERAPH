@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-01T08:52:53Z",
+  "title": "Design System: SERAPH",
+  "extensions": {
+    "colorMeta": {
+      "canvas": { "role": "neutral", "displayName": "Canvas Black" },
+      "panel": { "role": "neutral", "displayName": "Selection Charcoal" },
+      "text": { "role": "neutral", "displayName": "Primary Text" },
+      "muted": { "role": "neutral", "displayName": "Muted Text" },
+      "command-blue": { "role": "primary", "displayName": "Command Blue" },
+      "agent-violet": { "role": "secondary", "displayName": "Agent Violet" },
+      "connected-green": { "role": "tertiary", "displayName": "Connected Green" },
+      "failure-red": { "role": "tertiary", "displayName": "Failure Red" },
+      "idle-amber": { "role": "tertiary", "displayName": "Idle Amber" },
+      "model-teal": { "role": "secondary", "displayName": "Model Teal" },
+      "border": { "role": "neutral", "displayName": "Composer Border" },
+      "divider": { "role": "neutral", "displayName": "Footer Divider" }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "Terminal-inherited conversation and supporting text." },
+      "title": { "displayName": "Title", "purpose": "Bold product, surface, main-agent, and agent identifiers." },
+      "label": { "displayName": "Label", "purpose": "Terminal-inherited status and control metadata." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "running-spinner-frame", "value": "80ms", "purpose": "Advances the four-glyph running-agent indicator while work is active." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Shell Header",
+      "kind": "nav",
+      "description": "Project identity and the compact live agent rail.",
+      "html": "<div class=\"ds-shell-header\"><span><strong>SERAPH</strong>&nbsp;&nbsp;<span class=\"ds-shell-muted\">project</span></span><span><span class=\"ds-shell-green\">● main</span>&nbsp;&nbsp;<span class=\"ds-shell-violet\">⋅ a12</span>&nbsp;&nbsp;<span class=\"ds-shell-muted\">+2</span></span></div>",
+      "css": ".ds-shell-header { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #e1e1e1; font-family: monospace; white-space: nowrap; } .ds-shell-muted { color: #848484; } .ds-shell-green { color: #9ece6a; } .ds-shell-violet { color: #bb9af7; }"
+    },
+    {
+      "name": "Transcript Roles",
+      "kind": "custom",
+      "description": "Flat user, assistant, system, and error message treatments.",
+      "html": "<div class=\"ds-transcript\"><div><strong class=\"ds-transcript-user\">❯</strong> Inspect the current project</div><div>Working through the implementation.</div><div class=\"ds-transcript-system\"><span>●</span> Connected.</div><div class=\"ds-transcript-error\"><strong>!</strong> Could not submit.</div></div>",
+      "css": ".ds-transcript { display: grid; gap: 1em; padding: 1ch; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-transcript-user { color: #7aa2f7; } .ds-transcript-system { color: #848484; } .ds-transcript-system span { color: #9ece6a; } .ds-transcript-error { color: #f7768e; }"
+    },
+    {
+      "name": "Agent Summary",
+      "kind": "nav",
+      "refersTo": "agent-summary",
+      "description": "Persistent one-row agent count and roster entry point.",
+      "html": "<div class=\"ds-agent-summary\"><span><strong>◇ agents</strong>&nbsp; <span>4 total · 2 running</span></span><span class=\"ds-agent-action\">↓ all agents</span></div>",
+      "css": ".ds-agent-summary { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #848484; font-family: monospace; white-space: nowrap; } .ds-agent-summary strong { color: #bb9af7; } .ds-agent-action { color: #7aa2f7; }"
+    },
+    {
+      "name": "Composer",
+      "kind": "input",
+      "refersTo": "composer",
+      "description": "The shell's sole persistent enclosure and primary input.",
+      "html": "<label class=\"ds-composer\"><span class=\"ds-composer-title\"> ❯ </span><textarea aria-label=\"Ask SERAPH\" placeholder=\"Ask SERAPH…\"></textarea></label>",
+      "css": ".ds-composer { position: relative; display: block; height: 3em; border: 1px solid #505058; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-composer-title { position: absolute; top: -0.65em; left: 1ch; padding: 0 0.5ch; background: #141414; color: #7aa2f7; font-weight: 700; } .ds-composer textarea { width: calc(100% - 2ch); height: calc(100% - 1em); margin: 0.5em 1ch; border: 0; outline: 0; resize: none; background: transparent; color: #e1e1e1; font: inherit; } .ds-composer textarea::placeholder { color: #848484; } .ds-composer:focus-within { border-color: #505058; }"
+    },
+    {
+      "name": "Status Footer",
+      "kind": "nav",
+      "description": "Account, model, effort, and shortcut metadata in one row.",
+      "html": "<div class=\"ds-status-footer\"><span>signed out</span><span><b>gpt-5.6-sol</b><i>│</i><em>&lt; high &gt;</em><i>│</i>? help&nbsp; L account</span></div>",
+      "css": ".ds-status-footer { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #848484; font-family: monospace; white-space: nowrap; } .ds-status-footer b { color: #1abc9c; font-weight: 400; } .ds-status-footer em { color: #bb9af7; font-style: normal; } .ds-status-footer i { padding: 0 2ch; color: #585858; font-style: normal; }"
+    },
+    {
+      "name": "Selected Agent Row",
+      "kind": "custom",
+      "refersTo": "agent-selected",
+      "description": "Prime-style roster row with preserved status color and one-line result preview.",
+      "html": "<div class=\"ds-agent-block\"><div class=\"ds-agent-row\"><span class=\"ds-agent-running\">⋅</span> <strong>agent 12</strong>&nbsp;&nbsp;<span class=\"ds-agent-running\">running&nbsp;&nbsp;</span>Inspect the release path</div><div class=\"ds-agent-preview\">First result line appears here.</div></div>",
+      "css": ".ds-agent-block { background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-row { padding: 0 1ch; background: #242424; white-space: nowrap; overflow: hidden; } .ds-agent-running { color: #bb9af7; } .ds-agent-preview { padding-left: 4ch; color: #848484; white-space: nowrap; overflow: hidden; }"
+    },
+    {
+      "name": "All Agents Section",
+      "kind": "card",
+      "description": "Flat roster grouping separated by a single top rule.",
+      "html": "<section class=\"ds-agent-section\"><h3> Current project </h3><div><span class=\"ds-agent-complete\">●</span> <strong>main</strong>&nbsp;&nbsp;<span class=\"ds-agent-muted\">this conversation</span></div><div><span class=\"ds-agent-running\">⋅</span> <strong>agent 12</strong>&nbsp;&nbsp;<span class=\"ds-agent-running\">running</span>&nbsp;&nbsp;Inspect the release path</div></section>",
+      "css": ".ds-agent-section { position: relative; padding: 1em 1ch 0; border-top: 1px solid #242424; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-section h3 { position: absolute; top: -0.7em; left: 1ch; margin: 0; padding: 0 0.5ch; background: #141414; color: #e1e1e1; font-size: 1em; font-weight: 400; } .ds-agent-section div { white-space: nowrap; overflow: hidden; } .ds-agent-complete { color: #9ece6a; } .ds-agent-running { color: #bb9af7; } .ds-agent-muted { color: #848484; }"
+    },
+    {
+      "name": "Shortcut Panel",
+      "kind": "card",
+      "description": "Rounded keyboard reference shown over the transcript.",
+      "html": "<section class=\"ds-shortcuts\"><span class=\"ds-shortcuts-title\"> Shortcuts </span><strong>SERAPH</strong><br><br>Enter&nbsp;&nbsp;&nbsp;&nbsp;send<br>Alt+Enter&nbsp;&nbsp;newline<br>↓ / Ctrl+G&nbsp; all agents<br>? / Esc&nbsp;&nbsp;close help</section>",
+      "css": ".ds-shortcuts { position: relative; padding: 1em 2ch; border: 1px solid #242424; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-shortcuts-title { position: absolute; top: -0.7em; left: 1ch; padding: 0 0.5ch; background: #141414; color: #e1e1e1; } .ds-shortcuts strong { color: #bb9af7; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Agent Workbench",
+    "overview": "SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: dark GrokNight neutrals, a flat transcript, compact status chrome, and a rounded prompt. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.\n\nThe interface is dense without feeling crowded. Color is reserved for identity, state, and action; structure comes from terminal rows, alignment, whitespace, and sparse borders rather than panels around every region.",
+    "keyCharacteristics": [
+      "Near-black full-screen canvas with no ornamental backdrop.",
+      "Flat, dominant transcript framed by one-line operational rails.",
+      "Rounded composer and help chrome; roster sections use top rules only.",
+      "Agent state stays visible in the shell and expands into a keyboard-first roster.",
+      "Terminal-native typography, spacing, glyphs, and motion."
+    ],
+    "rules": [
+      { "name": "The Status-Only Color Rule", "body": "Accents identify action, agent identity, or runtime state; they do not decorate empty space.", "section": "colors" },
+      { "name": "The Terminal Owns Type Rule", "body": "Never introduce a bundled face or a separate size scale into these surfaces; preserve the terminal’s metrics.", "section": "typography" },
+      { "name": "The Transcript Wins Rule", "body": "Fixed chrome stays at six rows total around chat; all flexible height belongs to the conversation.", "section": "layout" },
+      { "name": "The Flat Workbench Rule", "body": "Add hierarchy with a tonal selection or one border, never stacked cards or simulated elevation.", "section": "elevation" },
+      { "name": "The One Enclosure Rule", "body": "The composer is the persistent enclosure; do not turn transcript messages or agent rows into cards.", "section": "shapes" }
+    ],
+    "dos": [
+      "Do keep chat as the dominant surface and agent state visible in one-line rails.",
+      "Do use the exact status mapping: violet running, green completed, red failed, amber other.",
+      "Do preserve terminal-cell alignment, keyboard navigation, and the selected agent’s one-line result preview.",
+      "Do use rounded borders only for the composer and shortcut panel."
+    ],
+    "donts": [
+      "Don't box transcript messages or every agent row into cards.",
+      "Don't use accent colors as decoration or assign a second meaning to a status color.",
+      "Don't add shadows, gradients, raster decoration, or a bundled font to these terminal surfaces.",
+      "Don't let expanded agent detail displace the primary chat shell; keep it in the dedicated All Agents view."
+    ]
+  }
+}

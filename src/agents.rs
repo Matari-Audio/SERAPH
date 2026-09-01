@@ -17,9 +17,11 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
-    sync::{Mutex, Notify, oneshot},
+    sync::{Mutex, Notify, mpsc, oneshot},
     task::{AbortHandle, JoinHandle},
 };
+
+use crate::tui::{AgentSummary, UiEvent};
 
 const MAX_RESULT_BYTES: usize = 2_048;
 const MAX_WAIT_IDS: usize = 8;
@@ -37,11 +39,13 @@ struct Inner {
     next_id: AtomicU64,
     records: Mutex<BTreeMap<u64, AgentRecord>>,
     changed: Notify,
+    ui: Option<mpsc::Sender<UiEvent>>,
 }
 
 struct AgentRecord {
     id: u64,
     status: AgentStatus,
+    prompt: String,
     result: Option<String>,
     task: Option<JoinHandle<()>>,
     stop: Option<oneshot::Sender<()>>,
@@ -54,7 +58,7 @@ enum AgentStatus {
 }
 
 impl AgentManager {
-    pub fn new(project: PathBuf) -> Result<Self> {
+    pub fn new(project: PathBuf, ui: Option<mpsc::Sender<UiEvent>>) -> Result<Self> {
         Ok(Self {
             executable: env::current_exe().context("locate SERAPH executable")?,
             project,
@@ -62,6 +66,7 @@ impl AgentManager {
                 next_id: AtomicU64::new(1),
                 records: Mutex::new(BTreeMap::new()),
                 changed: Notify::new(),
+                ui,
             }),
             aborts: StdMutex::new(Vec::new()),
         })
@@ -127,6 +132,7 @@ impl AgentManager {
             AgentRecord {
                 id,
                 status: AgentStatus::Running,
+                prompt: prompt.lines().next().unwrap_or(prompt).trim().to_owned(),
                 result: None,
                 task: None,
                 stop: Some(stop),
@@ -161,9 +167,15 @@ impl AgentManager {
                     bounded_text(error.to_string().as_bytes()),
                 ),
             };
-            if let Some(record) = inner.records.lock().await.get_mut(&id) {
+            let mut records = inner.records.lock().await;
+            if let Some(record) = records.get_mut(&id) {
                 record.status = status;
                 record.result = Some(result);
+            }
+            let summaries = records.values().map(AgentRecord::summary).collect();
+            drop(records);
+            if let Some(ui) = &inner.ui {
+                let _ = ui.send(UiEvent::AgentsChanged(summaries)).await;
             }
             inner.changed.notify_waiters();
         });
@@ -175,6 +187,7 @@ impl AgentManager {
             record.task = Some(task);
         }
         drop(records);
+        self.publish().await;
 
         Ok(json!({ "id": id, "status": "running" }))
     }
@@ -241,6 +254,20 @@ impl AgentManager {
             let _ = task.await;
         }
     }
+
+    async fn publish(&self) {
+        if let Some(ui) = &self.inner.ui {
+            let summaries = self
+                .inner
+                .records
+                .lock()
+                .await
+                .values()
+                .map(AgentRecord::summary)
+                .collect();
+            let _ = ui.send(UiEvent::AgentsChanged(summaries)).await;
+        }
+    }
 }
 
 impl AgentRecord {
@@ -260,7 +287,16 @@ impl AgentRecord {
     }
 
     fn summary_json(&self) -> Value {
-        json!({ "id": self.id, "status": self.status.as_str() })
+        json!({ "id": self.id, "status": self.status.as_str(), "prompt": self.prompt })
+    }
+
+    fn summary(&self) -> AgentSummary {
+        AgentSummary {
+            id: self.id,
+            status: self.status.as_str(),
+            prompt: self.prompt.clone(),
+            result: self.result.clone(),
+        }
     }
 }
 
