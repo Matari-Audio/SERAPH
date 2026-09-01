@@ -68,7 +68,18 @@ impl Codex {
     pub async fn spawn() -> Result<Self> {
         let auth = PiAuth::spawn().await?;
         let executable = env::var_os("SERAPH_CODEX").unwrap_or_else(|| {
-            let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("node_modules/.bin/codex");
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("node_modules/.bin/codex");
+            let bundled = if source.is_file() {
+                source
+            } else {
+                env::current_exe()
+                    .ok()
+                    .and_then(|path| {
+                        path.parent()
+                            .map(|path| path.join("node_modules/.bin/codex"))
+                    })
+                    .unwrap_or(source)
+            };
             if bundled.is_file() {
                 bundled.into_os_string()
             } else {
