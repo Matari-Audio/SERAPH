@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
@@ -53,14 +53,30 @@ pub enum UiEvent {
         efforts: Vec<String>,
         selected_effort: usize,
     },
+    LoginPending {
+        login_id: String,
+    },
     LoginStarted {
         login_id: String,
         auth_url: String,
+        instructions: Option<String>,
     },
+    LoginDeviceCode {
+        code: String,
+        url: String,
+    },
+    LoginPrompt {
+        kind: String,
+        message: String,
+        placeholder: Option<String>,
+        options: Vec<(String, String)>,
+    },
+    LoginProgress(String),
     LoginFinished {
         success: bool,
         error: Option<String>,
     },
+    LoginCancelled,
     AssistantDelta(String),
     AssistantDone,
     AgentsChanged(Vec<AgentSummary>),
@@ -72,10 +88,11 @@ pub enum UiEvent {
 
 #[derive(Debug)]
 pub enum UiCommand {
-    Login,
+    Login(String),
     CancelLogin {
         login_id: String,
     },
+    AnswerLoginPrompt(String),
     Submit {
         text: String,
         effort: Option<String>,
@@ -96,6 +113,17 @@ struct Message {
     text: String,
 }
 
+enum AuthPrompt {
+    Select {
+        message: String,
+        options: Vec<(String, String)>,
+        cursor: usize,
+    },
+    Input {
+        message: String,
+    },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Chat,
@@ -110,6 +138,12 @@ struct App {
     efforts: Vec<String>,
     selected_effort: usize,
     login_id: Option<String>,
+    auth_url: Option<String>,
+    auth_instructions: Option<String>,
+    auth_device: Option<(String, String)>,
+    auth_prompt: Option<AuthPrompt>,
+    auth_input: TextArea<'static>,
+    auth_progress: Option<String>,
     auth_pending: bool,
     ready: bool,
     busy: bool,
@@ -136,6 +170,12 @@ impl App {
             efforts: Vec::new(),
             selected_effort: 0,
             login_id: None,
+            auth_url: None,
+            auth_instructions: None,
+            auth_device: None,
+            auth_prompt: None,
+            auth_input: new_auth_input(None),
+            auth_progress: None,
             auth_pending: false,
             ready: false,
             busy: false,
@@ -173,21 +213,62 @@ impl App {
                 self.efforts = efforts;
                 self.selected_effort = selected_effort.min(self.efforts.len().saturating_sub(1));
             }
-            UiEvent::LoginStarted { login_id, auth_url } => {
+            UiEvent::LoginPending { login_id } => {
                 self.auth_pending = true;
                 self.login_id = Some(login_id);
-                let text = match webbrowser::open(&auth_url) {
-                    Ok(()) => format!("Finish signing in in your browser: {auth_url}"),
-                    Err(error) => format!("Open this URL to sign in: {auth_url}\n{error}"),
-                };
-                self.messages.push(Message {
-                    role: Role::System,
-                    text,
-                });
+                self.auth_progress = Some("Preparing authentication".into());
             }
+            UiEvent::LoginStarted {
+                login_id,
+                auth_url,
+                instructions,
+            } => {
+                self.auth_pending = true;
+                self.login_id = Some(login_id);
+                self.auth_url = Some(auth_url.clone());
+                self.auth_instructions = instructions;
+                self.auth_device = None;
+                self.auth_progress = None;
+                if let Err(error) = webbrowser::open(&auth_url) {
+                    self.messages.push(Message {
+                        role: Role::Error,
+                        text: format!("Could not open browser: {error}"),
+                    });
+                }
+            }
+            UiEvent::LoginDeviceCode { code, url } => {
+                self.auth_device = Some((code, url.clone()));
+                self.auth_prompt = None;
+                self.auth_progress = Some("Waiting for authentication...".into());
+                let _ = webbrowser::open(&url);
+            }
+            UiEvent::LoginPrompt {
+                kind,
+                message,
+                placeholder,
+                options,
+            } => {
+                self.auth_prompt = Some(if kind == "select" {
+                    AuthPrompt::Select {
+                        message,
+                        options,
+                        cursor: 0,
+                    }
+                } else {
+                    self.auth_input = new_auth_input(placeholder.as_deref());
+                    AuthPrompt::Input { message }
+                });
+                self.auth_progress = None;
+            }
+            UiEvent::LoginProgress(message) => self.auth_progress = Some(message),
             UiEvent::LoginFinished { success, error } => {
                 self.auth_pending = false;
                 self.login_id = None;
+                self.auth_url = None;
+                self.auth_instructions = None;
+                self.auth_device = None;
+                self.auth_prompt = None;
+                self.auth_progress = None;
                 self.messages.push(Message {
                     role: if success { Role::System } else { Role::Error },
                     text: error.unwrap_or_else(|| {
@@ -198,6 +279,15 @@ impl App {
                         }
                     }),
                 });
+            }
+            UiEvent::LoginCancelled => {
+                self.auth_pending = false;
+                self.login_id = None;
+                self.auth_url = None;
+                self.auth_instructions = None;
+                self.auth_device = None;
+                self.auth_prompt = None;
+                self.auth_progress = None;
             }
             UiEvent::AssistantDelta(delta) => {
                 if self.streaming {
@@ -237,6 +327,9 @@ impl App {
             UiEvent::Error(text) => {
                 self.busy = false;
                 self.streaming = false;
+                self.auth_pending = false;
+                self.login_id = None;
+                self.auth_prompt = None;
                 self.messages.push(Message {
                     role: Role::Error,
                     text,
@@ -365,6 +458,48 @@ impl App {
                         text: format!("Could not cancel sign-in: {error}"),
                     }),
                 }
+            } else if self.auth_pending {
+                self.auth_pending = false;
+                self.auth_prompt = None;
+                self.auth_progress = None;
+            }
+            return true;
+        }
+        if self.auth_pending {
+            match (&mut self.auth_prompt, key.code) {
+                (Some(AuthPrompt::Select { cursor, .. }), KeyCode::Up) => {
+                    *cursor = cursor.saturating_sub(1)
+                }
+                (
+                    Some(AuthPrompt::Select {
+                        cursor, options, ..
+                    }),
+                    KeyCode::Down,
+                ) => *cursor = (*cursor + 1).min(options.len().saturating_sub(1)),
+                (
+                    Some(AuthPrompt::Select {
+                        cursor, options, ..
+                    }),
+                    KeyCode::Enter,
+                ) => {
+                    if let Some((id, _)) = options.get(*cursor) {
+                        let _ = commands.try_send(UiCommand::Login(id.clone()));
+                        self.auth_prompt = None;
+                        self.auth_progress = Some("Preparing authentication".into());
+                    }
+                }
+                (Some(AuthPrompt::Input { .. }), KeyCode::Enter) => {
+                    let value = self.auth_input.lines().join("\n");
+                    if !value.trim().is_empty() {
+                        let _ = commands.try_send(UiCommand::AnswerLoginPrompt(value));
+                        self.auth_prompt = None;
+                        self.auth_progress = Some("Waiting for authentication...".into());
+                    }
+                }
+                (Some(AuthPrompt::Input { .. }), _) => {
+                    self.auth_input.input(key);
+                }
+                _ => {}
             }
             return true;
         }
@@ -394,15 +529,15 @@ impl App {
                 KeyCode::Char('l' | 'L')
                     if self.login_id.is_none() && !self.auth_pending && !self.busy =>
                 {
-                    match commands.try_send(UiCommand::Login) {
-                        Ok(()) => self.auth_pending = true,
-                        Err(error) => {
-                            self.messages.push(Message {
-                                role: Role::Error,
-                                text: format!("Could not start sign-in: {error}"),
-                            });
-                        }
-                    }
+                    self.auth_pending = true;
+                    self.auth_prompt = Some(AuthPrompt::Select {
+                        message: "Select OpenAI Codex login method:".into(),
+                        options: vec![
+                            ("browser".into(), "Browser login (default)".into()),
+                            ("device_code".into(), "Device code login (headless)".into()),
+                        ],
+                        cursor: 0,
+                    });
                     return true;
                 }
                 _ => {}
@@ -517,7 +652,7 @@ async fn run_loop(
             }
             () = &mut frame_delay, if dirty || app.animating() => {
                 app.tick = app.tick.wrapping_add(1);
-                dirty = app.animating();
+                dirty = true;
             }
         }
     }
@@ -604,6 +739,134 @@ fn render(frame: &mut Frame, app: &App) {
         Paragraph::new(footer_line(app, footer_area.width)),
         footer_area,
     );
+    if app.auth_pending {
+        render_login(frame, app);
+    }
+}
+
+fn render_login(frame: &mut Frame, app: &App) {
+    let outer = frame.area();
+    let width = outer.width.saturating_sub(2).min(88);
+    let height = outer.height.saturating_sub(2).min(22);
+    let area = ratatui::layout::Rect::new(
+        outer.x + outer.width.saturating_sub(width) / 2,
+        outer.y + outer.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(PANEL))
+        .title(" Login to OpenAI (ChatGPT Plus/Pro) ")
+        .title_bottom(Line::styled(
+            " Complete this step to continue setup. ",
+            Style::default().fg(MUTED),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block.style(Style::default().bg(BG).fg(TEXT)), area);
+
+    if let Some(AuthPrompt::Select {
+        message,
+        options,
+        cursor,
+    }) = &app.auth_prompt
+    {
+        let mut lines = vec![
+            Line::styled(message.clone(), Style::default().fg(TEXT).bold()),
+            Line::from(""),
+        ];
+        lines.extend(options.iter().enumerate().map(|(index, (_, label))| {
+            let selected = index == *cursor;
+            Line::styled(
+                format!("  {label}"),
+                if selected {
+                    Style::default().bg(PANEL).fg(TEXT).bold()
+                } else {
+                    Style::default().fg(TEXT)
+                },
+            )
+        }));
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "↑/↓ select  Enter continue  Esc cancel",
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+
+    if let Some((code, url)) = &app.auth_device {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled("Browser sign-in", Style::default().fg(TEXT).bold()),
+                Line::from(""),
+                Line::styled(url.clone(), Style::default().fg(BLUE)),
+                Line::from(""),
+                Line::styled("Verification code", Style::default().fg(TEXT).bold()),
+                Line::styled(code.clone(), Style::default().fg(TEXT).bold()),
+                Line::from(""),
+                Line::styled(
+                    app.auth_progress
+                        .as_deref()
+                        .unwrap_or("Waiting for authentication..."),
+                    Style::default().fg(MUTED),
+                ),
+                Line::styled("Esc cancel", Style::default().fg(MUTED)),
+            ])
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+
+    let mut lines = vec![
+        Line::styled("Browser sign-in", Style::default().fg(TEXT).bold()),
+        Line::styled(
+            "The sign-in page should already be opening. If it did not open, use the link below.",
+            Style::default().fg(MUTED),
+        ),
+        Line::from(""),
+        Line::styled("Sign-in link", Style::default().fg(TEXT).bold()),
+        Line::styled(
+            app.auth_url.as_deref().unwrap_or_default().to_owned(),
+            Style::default().fg(BLUE),
+        ),
+    ];
+    if let Some(instructions) = &app.auth_instructions {
+        lines.push(Line::styled("Next step", Style::default().fg(TEXT).bold()));
+        lines.push(Line::styled(
+            instructions.clone(),
+            Style::default().fg(MUTED),
+        ));
+    }
+    if let Some(AuthPrompt::Input { message }) = &app.auth_prompt {
+        lines.push(Line::styled(
+            "Manual fallback",
+            Style::default().fg(TEXT).bold(),
+        ));
+        lines.push(Line::styled(message.clone(), Style::default().fg(MUTED)));
+        let [text_area, input_area, hint_area] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text_area);
+        frame.render_widget(&app.auth_input, input_area);
+        frame.render_widget(
+            Paragraph::new("Enter submit  Esc cancel").style(Style::default().fg(MUTED)),
+            hint_area,
+        );
+    } else {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            app.auth_progress.as_deref().unwrap_or("Esc cancel"),
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
 }
 
 fn transcript_lines(messages: &[Message]) -> Vec<Line<'static>> {
@@ -654,6 +917,21 @@ fn new_composer() -> TextArea<'static> {
             )),
     );
     composer
+}
+
+fn new_auth_input(placeholder: Option<&str>) -> TextArea<'static> {
+    let mut input = TextArea::default();
+    input.set_placeholder_text(placeholder.unwrap_or("Paste value"));
+    input.set_placeholder_style(Style::default().fg(MUTED));
+    input.set_style(Style::default().bg(BG).fg(TEXT));
+    input.set_cursor_line_style(Style::default().bg(BG).fg(TEXT));
+    input.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(GROKNIGHT.prompt_border_active)),
+    );
+    input
 }
 
 fn header_line(app: &App, width: u16) -> Line<'static> {

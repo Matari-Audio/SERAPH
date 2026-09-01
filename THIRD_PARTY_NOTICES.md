@@ -48,3 +48,14 @@ The down-arrow All Agents entry point and current-project/other-project visual
 split in `src/tui.rs` are adapted from Prime Agent's Agents View at commit
 `4e42fab2ce0c486cd6da0237b56b9b7787d06bfd`, copyright 2025 Mario
 Zechner and 2026 Prime Intellect, under the MIT License reproduced above.
+
+## Pi authentication runtime
+
+`auth/pi-auth.mjs` delegates OpenAI Codex OAuth, credential persistence, and
+refresh to `@earendil-works/pi-coding-agent` version 0.84.4. Pi is copyright
+2025 Mario Zechner and is used under the MIT License reproduced above.
+
+The authentication pane and its browser, manual fallback, device-code, and
+cancel states in `src/tui.rs` are adapted from Prime Agent's
+`login-dialog.ts`, `oauth-selector.ts`, and `auth-flows.ts` at commit
+`4e42fab2ce0c486cd6da0237b56b9b7787d06bfd` under the same MIT License.

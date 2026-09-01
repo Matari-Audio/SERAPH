@@ -3,6 +3,7 @@ mod capability;
 mod codex;
 mod grok_ui;
 mod kernel;
+mod pi_auth;
 mod tasks;
 mod tui;
 
@@ -10,7 +11,7 @@ use std::{env, path::PathBuf, process::ExitCode, thread, time::Duration};
 
 use agents::AgentManager;
 use anyhow::{Context, Result, bail};
-use codex::{Codex, CodexEvent, ToolResult};
+use codex::{Codex, CodexEvent, LoginEvent, ToolResult};
 use kernel::Kernel;
 use serde_json::{Value, json};
 use tasks::TaskBoard;
@@ -237,36 +238,39 @@ async fn run_controller(
     let result: Result<()> = async {
         while let Some(command) = commands.recv().await {
             match command {
-                UiCommand::Login => match login(&mut codex, &events, &mut commands).await? {
-                    LoginOutcome::Complete => {
-                        events.send(UiEvent::Ready(false)).await?;
-                        account = codex.account(false).await?;
-                        send_account(&events, &account).await?;
-                        let models = codex.models().await?;
-                        let (next_model, efforts, selected_effort) = select_model(&models)?;
-                        model = next_model;
-                        events
-                            .send(UiEvent::ModelChanged {
-                                name: model.clone(),
-                                efforts,
-                                selected_effort,
-                            })
-                            .await?;
-                        thread = Some(codex.start_thread(&cwd, Some(&model)).await?);
-                        events.send(UiEvent::Ready(true)).await?;
-                        events
-                            .send(UiEvent::LoginFinished {
-                                success: true,
-                                error: None,
-                            })
-                            .await?;
+                UiCommand::Login(method) => {
+                    match login(&mut codex, &events, &mut commands, &method).await? {
+                        LoginOutcome::Complete => {
+                            events.send(UiEvent::Ready(false)).await?;
+                            account = codex.account(false).await?;
+                            send_account(&events, &account).await?;
+                            let models = codex.models().await?;
+                            let (next_model, efforts, selected_effort) = select_model(&models)?;
+                            model = next_model;
+                            events
+                                .send(UiEvent::ModelChanged {
+                                    name: model.clone(),
+                                    efforts,
+                                    selected_effort,
+                                })
+                                .await?;
+                            thread = Some(codex.start_thread(&cwd, Some(&model)).await?);
+                            events.send(UiEvent::Ready(true)).await?;
+                            events
+                                .send(UiEvent::LoginFinished {
+                                    success: true,
+                                    error: None,
+                                })
+                                .await?;
+                        }
+                        LoginOutcome::Cancelled => {}
+                        LoginOutcome::Quit => break,
                     }
-                    LoginOutcome::Cancelled => {}
-                    LoginOutcome::Quit => break,
-                },
+                }
                 UiCommand::CancelLogin { login_id } => {
                     codex.cancel_login(&login_id).await?;
                 }
+                UiCommand::AnswerLoginPrompt(_) => {}
                 UiCommand::Submit { text, effort } => {
                     let Some(thread_id) = thread.as_deref() else {
                         events
@@ -351,38 +355,90 @@ async fn login(
     codex: &mut Codex,
     events: &mpsc::Sender<UiEvent>,
     commands: &mut mpsc::Receiver<UiCommand>,
+    method: &str,
 ) -> Result<LoginOutcome> {
-    let (login_id, auth_url) = codex.start_chatgpt_login().await?;
+    let login_id = codex.start_chatgpt_login(method).await?;
     events
-        .send(UiEvent::LoginStarted {
+        .send(UiEvent::LoginPending {
             login_id: login_id.clone(),
-            auth_url,
         })
         .await?;
 
     enum Outcome {
-        Complete(Result<()>),
+        Complete,
+        Failed(anyhow::Error),
         Cancel,
         Quit,
     }
     let outcome = {
-        let completed = codex.wait_login_event(&login_id);
-        tokio::pin!(completed);
         loop {
-            tokio::select! {
-                result = &mut completed => break Outcome::Complete(result),
-                command = commands.recv() => match command {
-                    Some(UiCommand::CancelLogin { login_id: id }) if id == login_id => break Outcome::Cancel,
+            enum Next {
+                Event(Result<LoginEvent>),
+                Command(Option<UiCommand>),
+            }
+            let next = {
+                let event = codex.next_login_event(&login_id);
+                tokio::pin!(event);
+                tokio::select! {
+                    result = &mut event => Next::Event(result),
+                    command = commands.recv() => Next::Command(command),
+                }
+            };
+            match next {
+                Next::Event(result) => match result {
+                    Ok(LoginEvent::AuthUrl { url, instructions }) => {
+                        events
+                            .send(UiEvent::LoginStarted {
+                                login_id: login_id.clone(),
+                                auth_url: url,
+                                instructions,
+                            })
+                            .await?;
+                    }
+                    Ok(LoginEvent::DeviceCode { code, url }) => {
+                        events.send(UiEvent::LoginDeviceCode { code, url }).await?;
+                    }
+                    Ok(LoginEvent::Prompt {
+                        kind,
+                        message,
+                        placeholder,
+                        options,
+                    }) => {
+                        events
+                            .send(UiEvent::LoginPrompt {
+                                kind,
+                                message,
+                                placeholder,
+                                options: options
+                                    .into_iter()
+                                    .map(|option| (option.id, option.label))
+                                    .collect(),
+                            })
+                            .await?;
+                    }
+                    Ok(LoginEvent::Progress(message)) => {
+                        events.send(UiEvent::LoginProgress(message)).await?;
+                    }
+                    Ok(LoginEvent::Complete) => break Outcome::Complete,
+                    Err(error) => break Outcome::Failed(error),
+                },
+                Next::Command(command) => match command {
+                    Some(UiCommand::CancelLogin { login_id: id }) if id == login_id => {
+                        break Outcome::Cancel;
+                    }
+                    Some(UiCommand::AnswerLoginPrompt(value)) => {
+                        codex.answer_login_prompt(&value).await?
+                    }
                     Some(UiCommand::Quit) | None => break Outcome::Quit,
                     Some(_) => {}
-                }
+                },
             }
         }
     };
 
     match outcome {
-        Outcome::Complete(Ok(())) => Ok(LoginOutcome::Complete),
-        Outcome::Complete(Err(error)) => {
+        Outcome::Complete => Ok(LoginOutcome::Complete),
+        Outcome::Failed(error) => {
             events
                 .send(UiEvent::LoginFinished {
                     success: false,
@@ -393,12 +449,7 @@ async fn login(
         }
         Outcome::Cancel => {
             codex.cancel_login(&login_id).await?;
-            events
-                .send(UiEvent::LoginFinished {
-                    success: false,
-                    error: Some("Sign-in cancelled.".into()),
-                })
-                .await?;
+            events.send(UiEvent::LoginCancelled).await?;
             Ok(LoginOutcome::Cancelled)
         }
         Outcome::Quit => {

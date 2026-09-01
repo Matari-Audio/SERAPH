@@ -4,13 +4,14 @@ Stateful Execution Runtime for Agentic Programmatic Harness.
 
 SERAPH is an independent Rust and Ratatui agent harness that programs a persistent Python execution environment while keeping capabilities, artifacts, workflows, and agent coordination outside the model context until needed.
 
-Run the Codex-backed terminal chat:
+Install the Rust and Pi runtime dependencies, then start SERAPH:
 
 ```sh
+npm install
 cargo run
 ```
 
-SERAPH uses the installed `codex app-server` for ChatGPT authentication, model discovery, and streaming. Existing Codex login state is reused without exposing tokens to SERAPH; when signed out, press `L` to start the official browser login. Use `<` and `>` on an empty composer to change reasoning effort, `↓` or `Ctrl+G` to open All Agents, `?` for help, and `Ctrl+C` to quit.
+Prime/Pi's production `ModelRuntime` owns ChatGPT login, locked credential storage, and token refresh in `~/.seraph/auth.json`. SERAPH passes only short-lived access tokens to an isolated installed `codex app-server`; Codex never receives Pi's refresh token. Press `L`, choose Pi's browser or headless device-code flow, and complete the Prime-style login pane. Browser login includes Pi's manual redirect/code fallback. Use `<` and `>` on an empty composer to change reasoning effort, `↓` or `Ctrl+G` to open All Agents, `?` for help, and `Ctrl+C` to quit.
 
 The dock above the composer uses Grok Build's Dock V2 renderer and GrokNight primitives. Press `Tab` on an empty composer to focus it, navigate with arrows, and press `Enter` to collapse a section or open a subagent. Task state is read from the project SQLite board, so claims and completions made by child-agent processes appear without entering the conversation context.
 

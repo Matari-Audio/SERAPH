@@ -7,11 +7,32 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
+use crate::pi_auth::{ChatgptTokens, LoginOption, PiAuth, PiLoginEvent};
+
 pub enum CodexEvent {
     AgentMessageDelta(String),
     ToolCall(ToolCall),
     TurnError(String),
     TurnCompleted(Value),
+}
+
+pub enum LoginEvent {
+    AuthUrl {
+        url: String,
+        instructions: Option<String>,
+    },
+    DeviceCode {
+        code: String,
+        url: String,
+    },
+    Prompt {
+        kind: String,
+        message: String,
+        placeholder: Option<String>,
+        options: Vec<LoginOption>,
+    },
+    Progress(String),
+    Complete,
 }
 
 pub struct ToolCall {
@@ -33,12 +54,22 @@ pub struct Codex {
     output: Lines<BufReader<ChildStdout>>,
     backlog: VecDeque<Value>,
     next_id: u64,
+    auth: PiAuth,
 }
 
 impl Codex {
     pub async fn spawn() -> Result<Self> {
+        let auth = PiAuth::spawn().await?;
         let executable = env::var_os("SERAPH_CODEX").unwrap_or_else(|| "codex".into());
+        let codex_home = env::var_os("SERAPH_CODEX_HOME")
+            .map(Into::into)
+            .or_else(|| env::var_os("HOME").map(|home| Path::new(&home).join(".seraph/codex")))
+            .context("HOME is unavailable; set SERAPH_CODEX_HOME")?;
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .context("create isolated SERAPH Codex home")?;
         let mut child = Command::new(executable)
+            .env("CODEX_HOME", codex_home)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -54,6 +85,7 @@ impl Codex {
             output: BufReader::new(output).lines(),
             backlog: VecDeque::new(),
             next_id: 1,
+            auth,
         };
 
         codex
@@ -72,6 +104,9 @@ impl Codex {
         codex
             .write(json!({ "method": "initialized", "params": {} }))
             .await?;
+        if let Some(tokens) = codex.auth.tokens().await? {
+            codex.install_tokens(&tokens).await?;
+        }
         Ok(codex)
     }
 
@@ -80,43 +115,42 @@ impl Codex {
             .await
     }
 
-    pub async fn start_chatgpt_login(&mut self) -> Result<(String, String)> {
-        let response = self
-            .request("account/login/start", json!({ "type": "chatgpt" }))
-            .await?;
-        Ok((
-            required_string(&response, "loginId")?.to_owned(),
-            required_string(&response, "authUrl")?.to_owned(),
-        ))
+    pub async fn start_chatgpt_login(&mut self, method: &str) -> Result<String> {
+        Ok(self.auth.start_login(method).await?.to_string())
     }
 
-    pub async fn cancel_login(&mut self, login_id: &str) -> Result<()> {
-        self.request("account/login/cancel", json!({ "loginId": login_id }))
-            .await?;
-        Ok(())
+    pub async fn cancel_login(&mut self, _login_id: &str) -> Result<()> {
+        self.auth.cancel_login().await
     }
 
-    pub async fn wait_login_event(&mut self, login_id: &str) -> Result<()> {
-        loop {
-            if let Some(message) = self.take_queued(|message| {
-                message.get("method").and_then(Value::as_str) == Some("account/login/completed")
-                    && message.pointer("/params/loginId").and_then(Value::as_str) == Some(login_id)
-            }) {
-                return login_result(message);
+    pub async fn next_login_event(&mut self, login_id: &str) -> Result<LoginEvent> {
+        let id = login_id.parse().context("invalid Pi login id")?;
+        Ok(match self.auth.next_login_event(id).await? {
+            PiLoginEvent::AuthUrl { url, instructions } => {
+                LoginEvent::AuthUrl { url, instructions }
             }
-            let message = self.read().await?;
-            if is_server_request(&message) {
-                self.reject_request(&message).await?;
-                continue;
+            PiLoginEvent::DeviceCode { code, url } => LoginEvent::DeviceCode { code, url },
+            PiLoginEvent::Prompt {
+                kind,
+                message,
+                placeholder,
+                options,
+            } => LoginEvent::Prompt {
+                kind,
+                message,
+                placeholder,
+                options,
+            },
+            PiLoginEvent::Progress(message) => LoginEvent::Progress(message),
+            PiLoginEvent::Complete(tokens) => {
+                self.install_tokens(&tokens).await?;
+                LoginEvent::Complete
             }
-            if message.get("method").and_then(Value::as_str) != Some("account/login/completed")
-                || message.pointer("/params/loginId").and_then(Value::as_str) != Some(login_id)
-            {
-                self.backlog.push_back(message);
-                continue;
-            }
-            return login_result(message);
-        }
+        })
+    }
+
+    pub async fn answer_login_prompt(&mut self, value: &str) -> Result<()> {
+        self.auth.answer_prompt(value).await
     }
 
     pub async fn models(&mut self) -> Result<Value> {
@@ -243,7 +277,7 @@ impl Codex {
             let message = self.next_message().await?;
             let method = message.get("method").and_then(Value::as_str);
             if is_server_request(&message) && method != Some("item/tool/call") {
-                self.reject_request(&message).await?;
+                self.handle_server_request(&message).await?;
                 continue;
             }
             match method {
@@ -308,10 +342,14 @@ impl Codex {
 
     pub async fn shutdown(self) -> Result<()> {
         let Self {
-            mut child, input, ..
+            mut child,
+            input,
+            auth,
+            ..
         } = self;
         drop(input);
         child.wait().await.context("wait for Codex app-server")?;
+        auth.shutdown().await?;
         Ok(())
     }
 
@@ -345,7 +383,7 @@ impl Codex {
             }
             let message = self.read().await?;
             if is_server_request(&message) {
-                self.reject_request(&message).await?;
+                self.handle_server_request(&message).await?;
                 continue;
             }
             if is_response(&message, id) {
@@ -407,6 +445,43 @@ impl Codex {
         }))
         .await
     }
+
+    async fn install_tokens(&mut self, tokens: &ChatgptTokens) -> Result<()> {
+        self.request(
+            "account/login/start",
+            json!({
+                "type": "chatgptAuthTokens",
+                "accessToken": tokens.access_token,
+                "chatgptAccountId": tokens.account_id,
+                "chatgptPlanType": tokens.plan_type,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn handle_server_request(&mut self, request: &Value) -> Result<()> {
+        if request.get("method").and_then(Value::as_str)
+            == Some("account/chatgptAuthTokens/refresh")
+        {
+            let tokens = self
+                .auth
+                .refresh()
+                .await?
+                .context("Pi has no OpenAI Codex credential to refresh")?;
+            return self
+                .write(json!({
+                    "id": request["id"],
+                    "result": {
+                        "accessToken": tokens.access_token,
+                        "chatgptAccountId": tokens.account_id,
+                        "chatgptPlanType": tokens.plan_type,
+                    }
+                }))
+                .await;
+        }
+        self.reject_request(request).await
+    }
 }
 
 fn is_server_request(message: &Value) -> bool {
@@ -420,17 +495,6 @@ fn is_response(message: &Value, id: u64) -> bool {
 fn matches_turn(message: &Value, thread_id: &str, turn_id: &str) -> bool {
     message.pointer("/params/threadId").and_then(Value::as_str) == Some(thread_id)
         && message.pointer("/params/turnId").and_then(Value::as_str) == Some(turn_id)
-}
-
-fn login_result(message: Value) -> Result<()> {
-    if message.pointer("/params/success").and_then(Value::as_bool) == Some(true) {
-        return Ok(());
-    }
-    let error = message
-        .pointer("/params/error")
-        .and_then(Value::as_str)
-        .unwrap_or("ChatGPT login failed");
-    bail!("{error}")
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
