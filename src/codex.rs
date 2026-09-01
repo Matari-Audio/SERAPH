@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, env, path::Path, process::Stdio};
+use std::{
+    collections::VecDeque,
+    env,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -60,7 +65,14 @@ pub struct Codex {
 impl Codex {
     pub async fn spawn() -> Result<Self> {
         let auth = PiAuth::spawn().await?;
-        let executable = env::var_os("SERAPH_CODEX").unwrap_or_else(|| "codex".into());
+        let executable = env::var_os("SERAPH_CODEX").unwrap_or_else(|| {
+            let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("node_modules/.bin/codex");
+            if bundled.is_file() {
+                bundled.into_os_string()
+            } else {
+                "codex".into()
+            }
+        });
         let codex_home = env::var_os("SERAPH_CODEX_HOME")
             .map(Into::into)
             .or_else(|| env::var_os("HOME").map(|home| Path::new(&home).join(".seraph/codex")))
