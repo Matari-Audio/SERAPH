@@ -53,6 +53,7 @@ pub enum UiEvent {
         efforts: Vec<String>,
         selected_effort: usize,
     },
+    LoginProviders(Vec<(String, String)>),
     LoginPending {
         login_id: String,
     },
@@ -88,7 +89,10 @@ pub enum UiEvent {
 
 #[derive(Debug)]
 pub enum UiCommand {
-    Login(String),
+    Login {
+        provider: String,
+        auth_type: String,
+    },
     CancelLogin {
         login_id: String,
     },
@@ -118,9 +122,11 @@ enum AuthPrompt {
         message: String,
         options: Vec<(String, String)>,
         cursor: usize,
+        starts_login: bool,
     },
     Input {
         message: String,
+        secret: bool,
     },
 }
 
@@ -145,6 +151,7 @@ struct App {
     auth_input: TextArea<'static>,
     auth_progress: Option<String>,
     auth_pending: bool,
+    login_providers: Vec<(String, String)>,
     ready: bool,
     busy: bool,
     streaming: bool,
@@ -179,6 +186,7 @@ impl App {
             auth_input: new_auth_input(None),
             auth_progress: None,
             auth_pending: false,
+            login_providers: Vec::new(),
             ready: false,
             busy: false,
             streaming: false,
@@ -226,6 +234,7 @@ impl App {
                 self.efforts = efforts;
                 self.selected_effort = selected_effort.min(self.efforts.len().saturating_sub(1));
             }
+            UiEvent::LoginProviders(providers) => self.login_providers = providers,
             UiEvent::LoginPending { login_id } => {
                 self.auth_pending = true;
                 self.login_id = Some(login_id);
@@ -266,10 +275,14 @@ impl App {
                         message,
                         options,
                         cursor: 0,
+                        starts_login: false,
                     }
                 } else {
                     self.auth_input = new_auth_input(placeholder.as_deref());
-                    AuthPrompt::Input { message }
+                    AuthPrompt::Input {
+                        message,
+                        secret: kind == "secret",
+                    }
                 });
                 self.auth_progress = None;
             }
@@ -533,12 +546,25 @@ impl App {
                 ) => *cursor = (*cursor + 1).min(options.len().saturating_sub(1)),
                 (
                     Some(AuthPrompt::Select {
-                        cursor, options, ..
+                        cursor,
+                        options,
+                        starts_login,
+                        ..
                     }),
                     KeyCode::Enter,
                 ) => {
                     if let Some((id, _)) = options.get(*cursor) {
-                        let _ = commands.try_send(UiCommand::Login(id.clone()));
+                        let command = if *starts_login {
+                            let (provider, auth_type) =
+                                id.split_once('\t').unwrap_or((id, "oauth"));
+                            UiCommand::Login {
+                                provider: provider.into(),
+                                auth_type: auth_type.into(),
+                            }
+                        } else {
+                            UiCommand::AnswerLoginPrompt(id.clone())
+                        };
+                        let _ = commands.try_send(command);
                         self.auth_prompt = None;
                         self.auth_progress = Some("Preparing authentication".into());
                     }
@@ -586,12 +612,10 @@ impl App {
                 {
                     self.auth_pending = true;
                     self.auth_prompt = Some(AuthPrompt::Select {
-                        message: "Select OpenAI Codex login method:".into(),
-                        options: vec![
-                            ("browser".into(), "Browser login (default)".into()),
-                            ("device_code".into(), "Device code login (headless)".into()),
-                        ],
+                        message: "Select provider and login method:".into(),
+                        options: self.login_providers.clone(),
                         cursor: 0,
+                        starts_login: true,
                     });
                     return true;
                 }
@@ -815,7 +839,7 @@ fn render_login(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(PANEL))
-        .title(" Login to OpenAI (ChatGPT Plus/Pro) ")
+        .title(" Login with Pi ")
         .title_bottom(Line::styled(
             " Complete this step to continue setup. ",
             Style::default().fg(MUTED),
@@ -828,23 +852,28 @@ fn render_login(frame: &mut Frame, app: &App) {
         message,
         options,
         cursor,
+        ..
     }) = &app.auth_prompt
     {
         let mut lines = vec![
             Line::styled(message.clone(), Style::default().fg(TEXT).bold()),
             Line::from(""),
         ];
-        lines.extend(options.iter().enumerate().map(|(index, (_, label))| {
-            let selected = index == *cursor;
-            Line::styled(
-                format!("  {label}"),
-                if selected {
-                    Style::default().bg(PANEL).fg(TEXT).bold()
-                } else {
-                    Style::default().fg(TEXT)
-                },
-            )
-        }));
+        let visible = usize::from(inner.height.saturating_sub(4)).max(1);
+        let start = cursor.saturating_sub(visible.saturating_sub(1));
+        lines.extend(options.iter().enumerate().skip(start).take(visible).map(
+            |(index, (_, label))| {
+                let selected = index == *cursor;
+                Line::styled(
+                    format!("  {label}"),
+                    if selected {
+                        Style::default().bg(PANEL).fg(TEXT).bold()
+                    } else {
+                        Style::default().fg(TEXT)
+                    },
+                )
+            },
+        ));
         lines.push(Line::from(""));
         lines.push(Line::styled(
             "↑/↓ select  Enter continue  Esc cancel",
@@ -878,19 +907,18 @@ fn render_login(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let mut lines = vec![
-        Line::styled("Browser sign-in", Style::default().fg(TEXT).bold()),
-        Line::styled(
-            "The sign-in page should already be opening. If it did not open, use the link below.",
-            Style::default().fg(MUTED),
-        ),
-        Line::from(""),
-        Line::styled("Sign-in link", Style::default().fg(TEXT).bold()),
-        Line::styled(
-            app.auth_url.as_deref().unwrap_or_default().to_owned(),
-            Style::default().fg(BLUE),
-        ),
-    ];
+    let mut lines = app.auth_url.as_ref().map_or_else(Vec::new, |url| {
+        vec![
+            Line::styled("Browser sign-in", Style::default().fg(TEXT).bold()),
+            Line::styled(
+                "The sign-in page should already be opening. If it did not open, use the link below.",
+                Style::default().fg(MUTED),
+            ),
+            Line::from(""),
+            Line::styled("Sign-in link", Style::default().fg(TEXT).bold()),
+            Line::styled(url.clone(), Style::default().fg(BLUE)),
+        ]
+    });
     if let Some(instructions) = &app.auth_instructions {
         lines.push(Line::styled("Next step", Style::default().fg(TEXT).bold()));
         lines.push(Line::styled(
@@ -898,9 +926,13 @@ fn render_login(frame: &mut Frame, app: &App) {
             Style::default().fg(MUTED),
         ));
     }
-    if let Some(AuthPrompt::Input { message }) = &app.auth_prompt {
+    if let Some(AuthPrompt::Input { message, secret }) = &app.auth_prompt {
         lines.push(Line::styled(
-            "Manual fallback",
+            if *secret {
+                "Credential"
+            } else {
+                "Manual fallback"
+            },
             Style::default().fg(TEXT).bold(),
         ));
         lines.push(Line::styled(message.clone(), Style::default().fg(MUTED)));
@@ -911,7 +943,15 @@ fn render_login(frame: &mut Frame, app: &App) {
         ])
         .areas(inner);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text_area);
-        frame.render_widget(&app.auth_input, input_area);
+        if *secret {
+            frame.render_widget(
+                Paragraph::new("•".repeat(app.auth_input.lines().join("\n").chars().count()))
+                    .block(Block::default().borders(Borders::ALL)),
+                input_area,
+            );
+        } else {
+            frame.render_widget(&app.auth_input, input_area);
+        }
         frame.render_widget(
             Paragraph::new("Enter submit  Esc cancel").style(Style::default().fg(MUTED)),
             hint_area,

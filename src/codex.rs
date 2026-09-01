@@ -12,7 +12,7 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
-use crate::pi_auth::{ChatgptTokens, LoginOption, PiAuth, PiLoginEvent};
+use crate::pi_auth::{ChatgptTokens, LoginOption, LoginProvider, PiAuth, PiLoginEvent};
 
 pub enum CodexEvent {
     AgentMessageDelta(String),
@@ -37,7 +37,9 @@ pub enum LoginEvent {
         options: Vec<LoginOption>,
     },
     Progress(String),
-    Complete,
+    Complete {
+        backend_ready: bool,
+    },
 }
 
 pub struct ToolCall {
@@ -128,8 +130,16 @@ impl Codex {
             .await
     }
 
-    pub async fn start_chatgpt_login(&mut self, method: &str) -> Result<String> {
-        Ok(self.auth.start_login(method).await?.to_string())
+    pub async fn login_providers(&mut self) -> Result<Vec<LoginProvider>> {
+        self.auth.login_providers().await
+    }
+
+    pub async fn start_login(&mut self, provider: &str, auth_type: &str) -> Result<String> {
+        Ok(self
+            .auth
+            .start_login(provider, auth_type)
+            .await?
+            .to_string())
     }
 
     pub async fn cancel_login(&mut self, _login_id: &str) -> Result<()> {
@@ -155,9 +165,13 @@ impl Codex {
                 options,
             },
             PiLoginEvent::Progress(message) => LoginEvent::Progress(message),
-            PiLoginEvent::Complete(tokens) => {
-                self.install_tokens(&tokens).await?;
-                LoginEvent::Complete
+            PiLoginEvent::Complete { provider, tokens } => {
+                if let Some(tokens) = tokens {
+                    self.install_tokens(&tokens).await?;
+                }
+                LoginEvent::Complete {
+                    backend_ready: provider == "openai-codex",
+                }
             }
         })
     }
