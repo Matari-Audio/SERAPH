@@ -200,6 +200,15 @@ impl App {
         self.composer.lines().iter().all(String::is_empty)
     }
 
+    fn set_dock_focused(&mut self, focused: bool) {
+        self.dock_focused = focused;
+        self.composer.set_block(composer_block(if focused {
+            GROKNIGHT.prompt_border
+        } else {
+            GROKNIGHT.prompt_border_active
+        }));
+    }
+
     fn apply(&mut self, event: UiEvent) {
         match event {
             UiEvent::AccountChanged(account) => self.account = account,
@@ -401,7 +410,7 @@ impl App {
             let data = dock_data(self);
             let items = grok_ui::visible_items(&data);
             match key.code {
-                KeyCode::Esc | KeyCode::Tab => self.dock_focused = false,
+                KeyCode::Esc | KeyCode::Tab => self.set_dock_focused(false),
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.dock_cursor = self.dock_cursor.saturating_sub(1)
                 }
@@ -417,7 +426,7 @@ impl App {
                     }
                     Some(DockItem::Row(Section::Subagents, index)) => {
                         self.selected_agent = *index;
-                        self.dock_focused = false;
+                        self.set_dock_focused(false);
                         self.view = View::Agents;
                     }
                     _ => {}
@@ -506,7 +515,7 @@ impl App {
         if self.is_composer_empty() {
             match key.code {
                 KeyCode::Tab if !grok_ui::visible_items(&dock_data(self)).is_empty() => {
-                    self.dock_focused = true;
+                    self.set_dock_focused(true);
                     self.dock_cursor = 0;
                     return true;
                 }
@@ -906,17 +915,19 @@ fn new_composer() -> TextArea<'static> {
     composer.set_placeholder_style(Style::default().fg(MUTED));
     composer.set_style(Style::default().bg(BG).fg(TEXT));
     composer.set_cursor_line_style(Style::default().bg(BG).fg(TEXT));
-    composer.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(GROKNIGHT.prompt_border_active))
-            .title(Span::styled(
-                format!(" {}", grok_ui::prompt_arrow()),
-                Style::default().fg(BLUE).bold(),
-            )),
-    );
+    composer.set_block(composer_block(GROKNIGHT.prompt_border_active));
     composer
+}
+
+fn composer_block(border: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border))
+        .title(Span::styled(
+            format!(" {}", grok_ui::prompt_arrow()),
+            Style::default().fg(BLUE).bold(),
+        ))
 }
 
 fn new_auth_input(placeholder: Option<&str>) -> TextArea<'static> {

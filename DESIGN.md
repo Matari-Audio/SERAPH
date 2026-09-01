@@ -13,6 +13,7 @@ colors:
   failure-red: "#f7768e"
   idle-amber: "#e0af68"
   model-teal: "#1abc9c"
+  border-idle: "#323237"
   border: "#505058"
   divider: "#585858"
 typography:
@@ -88,7 +89,7 @@ GrokNight neutrals carry the workspace; restrained TokyoNight accents encode act
 - **Primary Text** (`#e1e1e1`): Transcript copy, titles, prompts, and selected content.
 - **Muted Text** (`#6c6c6c`): Paths, counts, account state, hints, result previews, and supporting copy.
 - **Section Label** (`#787878`): Bold Dock V2 header labels and the selected subagent’s open indicator.
-- **Composer Border** (`#505058`): The rounded prompt outline.
+- **Composer Border** (`#323237` idle, `#505058` focused): The rounded prompt outline follows keyboard focus.
 - **Footer Divider** (`#585858`): Compact separators between footer controls.
 
 **The Status-Only Color Rule.** Accents identify action, agent identity, or runtime state; they do not decorate empty space.
@@ -158,7 +159,7 @@ The composer, shortcut panel, and temporary authentication pane use Ratatui’s 
 
 ### Composer
 
-- **Shape:** Rounded terminal border in Composer Border.
+- **Shape:** Rounded terminal border, dim while the dock owns focus and bright while the composer owns focus.
 - **Size:** Fixed at three terminal rows.
 - **Content:** Primary text on Canvas Black, muted “Ask SERAPH…” placeholder, and a bold blue `❯` title.
 - **Behavior:** Enter sends; Alt+Enter inserts a newline.
