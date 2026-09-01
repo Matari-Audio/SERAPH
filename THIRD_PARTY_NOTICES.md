@@ -27,3 +27,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## xAI Grok Build GrokNight palette
+
+The terminal color constants in `src/tui.rs` are adapted from Grok Build's
+GrokNight palette at commit `bb7f39d`, copyright xAI, under the Apache License
+2.0: <https://github.com/xai-org/grok-build/blob/bb7f39d/LICENSE>.

@@ -1,10 +1,22 @@
 mod capability;
+mod codex;
 mod kernel;
+mod tui;
 
-use std::{env, process::ExitCode};
+use std::{env, process::ExitCode, time::Duration};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use codex::{Codex, CodexEvent, ToolResult};
 use kernel::Kernel;
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tui::{UiCommand, UiEvent};
+
+enum LoginOutcome {
+    Complete,
+    Cancelled,
+    Quit,
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -19,8 +31,11 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let mut args = env::args().skip(1);
-    if args.next().as_deref() != Some("exec") {
-        bail!("usage: seraph exec '<python cell>' ['<python cell>' ...]");
+    let Some(command) = args.next() else {
+        return run_chat().await;
+    };
+    if command != "exec" {
+        bail!("usage: seraph [exec '<python cell>' ['<python cell>' ...]]");
     }
 
     let cells: Vec<String> = args.collect();
@@ -44,4 +59,406 @@ async fn run() -> Result<()> {
     }
 
     kernel.shutdown().await
+}
+
+async fn run_chat() -> Result<()> {
+    let (events, event_rx) = mpsc::channel(64);
+    let (commands, command_rx) = mpsc::channel(16);
+    let controller_events = events.clone();
+    let mut controller = tokio::spawn(async move {
+        let result = run_controller(events, command_rx).await;
+        if let Err(error) = &result {
+            let _ = controller_events
+                .send(UiEvent::Error(format!("{error:#}")))
+                .await;
+        }
+        result
+    });
+    let ui_result = tui::run(event_rx, commands.clone()).await;
+    let _ = commands.try_send(UiCommand::Quit);
+    if let Err(error) = ui_result {
+        controller.abort();
+        return Err(error);
+    }
+    match tokio::time::timeout(Duration::from_secs(2), &mut controller).await {
+        Ok(result) => result.context("join SERAPH controller")?,
+        Err(_) => {
+            controller.abort();
+            let _ = controller.await;
+            Ok(())
+        }
+    }
+}
+
+async fn run_controller(
+    events: mpsc::Sender<UiEvent>,
+    mut commands: mpsc::Receiver<UiCommand>,
+) -> Result<()> {
+    let mut codex = match Codex::spawn().await {
+        Ok(codex) => codex,
+        Err(error) => {
+            let _ = events.send(UiEvent::Error(format!("{error:#}"))).await;
+            return Ok(());
+        }
+    };
+    let mut account = codex.account(false).await?;
+    send_account(&events, &account).await?;
+    let models = codex.models().await?;
+    let (mut model, efforts, selected_effort) = select_model(&models)?;
+    events
+        .send(UiEvent::ModelChanged {
+            name: model.clone(),
+            efforts,
+            selected_effort,
+        })
+        .await?;
+
+    let cwd = env::current_dir().context("read current directory")?;
+    let mut thread = if signed_in(&account) {
+        Some(codex.start_thread(&cwd, Some(&model)).await?)
+    } else {
+        None
+    };
+    let kernel = Kernel::spawn().await?;
+    events.send(UiEvent::Ready(thread.is_some())).await?;
+
+    while let Some(command) = commands.recv().await {
+        match command {
+            UiCommand::Login => match login(&mut codex, &events, &mut commands).await? {
+                LoginOutcome::Complete => {
+                    events.send(UiEvent::Ready(false)).await?;
+                    account = codex.account(false).await?;
+                    send_account(&events, &account).await?;
+                    let models = codex.models().await?;
+                    let (next_model, efforts, selected_effort) = select_model(&models)?;
+                    model = next_model;
+                    events
+                        .send(UiEvent::ModelChanged {
+                            name: model.clone(),
+                            efforts,
+                            selected_effort,
+                        })
+                        .await?;
+                    thread = Some(codex.start_thread(&cwd, Some(&model)).await?);
+                    events.send(UiEvent::Ready(true)).await?;
+                    events
+                        .send(UiEvent::LoginFinished {
+                            success: true,
+                            error: None,
+                        })
+                        .await?;
+                }
+                LoginOutcome::Cancelled => {}
+                LoginOutcome::Quit => break,
+            },
+            UiCommand::CancelLogin { login_id } => {
+                codex.cancel_login(&login_id).await?;
+            }
+            UiCommand::Submit { text, effort } => {
+                let Some(thread_id) = thread.as_deref() else {
+                    events
+                        .send(UiEvent::Error("Sign in before sending a message.".into()))
+                        .await?;
+                    continue;
+                };
+                match run_turn(
+                    &mut codex,
+                    &kernel,
+                    &events,
+                    &mut commands,
+                    thread_id,
+                    &text,
+                    effort.as_deref(),
+                )
+                .await
+                {
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(error) => events.send(UiEvent::Error(format!("{error:#}"))).await?,
+                }
+            }
+            UiCommand::Quit => break,
+        }
+    }
+
+    kernel.shutdown().await?;
+    codex.shutdown().await
+}
+
+async fn login(
+    codex: &mut Codex,
+    events: &mpsc::Sender<UiEvent>,
+    commands: &mut mpsc::Receiver<UiCommand>,
+) -> Result<LoginOutcome> {
+    let (login_id, auth_url) = codex.start_chatgpt_login().await?;
+    events
+        .send(UiEvent::LoginStarted {
+            login_id: login_id.clone(),
+            auth_url,
+        })
+        .await?;
+
+    enum Outcome {
+        Complete(Result<()>),
+        Cancel,
+        Quit,
+    }
+    let outcome = {
+        let completed = codex.wait_login_event(&login_id);
+        tokio::pin!(completed);
+        loop {
+            tokio::select! {
+                result = &mut completed => break Outcome::Complete(result),
+                command = commands.recv() => match command {
+                    Some(UiCommand::CancelLogin { login_id: id }) if id == login_id => break Outcome::Cancel,
+                    Some(UiCommand::Quit) | None => break Outcome::Quit,
+                    Some(_) => {}
+                }
+            }
+        }
+    };
+
+    match outcome {
+        Outcome::Complete(Ok(())) => Ok(LoginOutcome::Complete),
+        Outcome::Complete(Err(error)) => {
+            events
+                .send(UiEvent::LoginFinished {
+                    success: false,
+                    error: Some(format!("{error:#}")),
+                })
+                .await?;
+            Ok(LoginOutcome::Cancelled)
+        }
+        Outcome::Cancel => {
+            codex.cancel_login(&login_id).await?;
+            events
+                .send(UiEvent::LoginFinished {
+                    success: false,
+                    error: Some("Sign-in cancelled.".into()),
+                })
+                .await?;
+            Ok(LoginOutcome::Cancelled)
+        }
+        Outcome::Quit => {
+            codex.cancel_login(&login_id).await?;
+            Ok(LoginOutcome::Quit)
+        }
+    }
+}
+
+async fn run_turn(
+    codex: &mut Codex,
+    kernel: &Kernel,
+    ui: &mpsc::Sender<UiEvent>,
+    commands: &mut mpsc::Receiver<UiCommand>,
+    thread_id: &str,
+    prompt: &str,
+    effort: Option<&str>,
+) -> Result<bool> {
+    let turn_id = codex.start_turn(thread_id, prompt, effort).await?;
+    let mut turn_error = None;
+
+    loop {
+        enum Next {
+            Event(Result<CodexEvent>),
+            Quit,
+        }
+        let next = {
+            let event = codex.next_turn_event(thread_id, &turn_id);
+            tokio::pin!(event);
+            tokio::select! {
+                event = &mut event => Next::Event(event),
+                command = commands.recv() => match command {
+                    Some(UiCommand::Quit) | None => Next::Quit,
+                    Some(_) => {
+                        ui.send(UiEvent::Notice("The current turn is still running.".into())).await?;
+                        continue;
+                    },
+                }
+            }
+        };
+        match next {
+            Next::Event(Ok(CodexEvent::AgentMessageDelta(delta))) => {
+                ui.send(UiEvent::AssistantDelta(delta)).await?
+            }
+            Next::Event(Ok(CodexEvent::ToolCall(call))) => {
+                enum ToolOutcome {
+                    Complete(Result<String>),
+                    Quit,
+                }
+                let result = {
+                    let execution =
+                        execute_tool(kernel, &call.namespace, &call.tool, &call.arguments);
+                    tokio::pin!(execution);
+                    loop {
+                        tokio::select! {
+                            result = &mut execution => break ToolOutcome::Complete(result),
+                            command = commands.recv() => match command {
+                                Some(UiCommand::Quit) | None => break ToolOutcome::Quit,
+                                Some(_) => ui.send(UiEvent::Notice("Python is still running.".into())).await?,
+                            }
+                        }
+                    }
+                };
+                let ToolOutcome::Complete(result) = result else {
+                    codex
+                        .respond_tool(
+                            call,
+                            ToolResult {
+                                text: "Turn interrupted before Python completed.".into(),
+                                success: false,
+                            },
+                        )
+                        .await?;
+                    interrupt_turn(codex, thread_id, &turn_id).await?;
+                    return Ok(true);
+                };
+                codex
+                    .respond_tool(
+                        call,
+                        match result {
+                            Ok(text) => ToolResult {
+                                text,
+                                success: true,
+                            },
+                            Err(error) => ToolResult {
+                                text: format!("{error:#}"),
+                                success: false,
+                            },
+                        },
+                    )
+                    .await?;
+            }
+            Next::Event(Ok(CodexEvent::TurnError(error))) => turn_error = Some(error),
+            Next::Event(Ok(CodexEvent::TurnCompleted(turn))) => {
+                match turn.get("status").and_then(Value::as_str) {
+                    Some("completed") => ui.send(UiEvent::AssistantDone).await?,
+                    Some("interrupted") => {
+                        ui.send(UiEvent::Error("Turn interrupted.".into())).await?
+                    }
+                    Some("failed") => bail!(
+                        "Codex turn failed: {}",
+                        turn.get("error")
+                            .map(Value::to_string)
+                            .or(turn_error)
+                            .unwrap_or_else(|| "unknown error".into())
+                    ),
+                    status => bail!("Codex turn ended with unexpected status {status:?}"),
+                }
+                return Ok(false);
+            }
+            Next::Event(Err(error)) => return Err(error),
+            Next::Quit => {
+                interrupt_turn(codex, thread_id, &turn_id).await?;
+                return Ok(true);
+            }
+        }
+    }
+}
+
+async fn interrupt_turn(codex: &mut Codex, thread_id: &str, turn_id: &str) -> Result<()> {
+    codex.interrupt_turn(thread_id, turn_id).await?;
+    loop {
+        match codex.next_turn_event(thread_id, turn_id).await? {
+            CodexEvent::ToolCall(call) => {
+                codex
+                    .respond_tool(
+                        call,
+                        ToolResult {
+                            text: "Turn interrupted before tool execution.".into(),
+                            success: false,
+                        },
+                    )
+                    .await?;
+            }
+            CodexEvent::TurnCompleted(_) => return Ok(()),
+            CodexEvent::AgentMessageDelta(_) | CodexEvent::TurnError(_) => {}
+        }
+    }
+}
+
+async fn execute_tool(
+    kernel: &Kernel,
+    namespace: &Option<String>,
+    tool: &str,
+    arguments: &Value,
+) -> Result<String> {
+    if namespace.as_deref() != Some("seraph") || tool != "python" {
+        bail!(
+            "unknown dynamic tool {}.{tool}",
+            namespace.as_deref().unwrap_or("")
+        );
+    }
+    let code = arguments
+        .get("code")
+        .and_then(Value::as_str)
+        .context("seraph.python requires a string code argument")?;
+    let output = kernel.execute(code).await?;
+    let projection = serde_json::to_string(&json!({
+        "emitted": output.emitted,
+        "stdout_bytes": output.stdout.len(),
+        "stderr_bytes": output.stderr.len(),
+        "background_stdout_bytes": output.background_stdout.len(),
+        "background_stderr_bytes": output.background_stderr.len(),
+        "truncated": output.truncated,
+    }))?;
+    if projection.len() > 32 * 1024 {
+        bail!("Python projection exceeded 32 KiB; emit a smaller filtered result");
+    }
+    Ok(projection)
+}
+
+fn signed_in(account: &Value) -> bool {
+    !account.pointer("/account").is_none_or(Value::is_null)
+}
+
+async fn send_account(events: &mpsc::Sender<UiEvent>, account: &Value) -> Result<()> {
+    let label = account.pointer("/account").and_then(|account| {
+        let kind = account.get("type")?.as_str()?;
+        Some(match kind {
+            "chatgpt" => {
+                let plan = account
+                    .get("planType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match account.get("email").and_then(Value::as_str) {
+                    Some(email) => email.to_owned(),
+                    None => format!("ChatGPT {plan}"),
+                }
+            }
+            "apiKey" => "OpenAI API".into(),
+            _ => kind.to_owned(),
+        })
+    });
+    events.send(UiEvent::AccountChanged(label)).await?;
+    Ok(())
+}
+
+fn select_model(models: &Value) -> Result<(String, Vec<String>, usize)> {
+    let models = models
+        .get("data")
+        .and_then(Value::as_array)
+        .context("model/list omitted data")?;
+    let model = models
+        .iter()
+        .find(|model| model.get("isDefault").and_then(Value::as_bool) == Some(true))
+        .or_else(|| models.first())
+        .context("Codex returned no models")?;
+    let name = model
+        .get("id")
+        .and_then(Value::as_str)
+        .context("Codex model omitted id")?
+        .to_owned();
+    let efforts: Vec<String> = model
+        .get("supportedReasoningEfforts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| option.get("reasoningEffort")?.as_str().map(str::to_owned))
+        .collect();
+    let default = model.get("defaultReasoningEffort").and_then(Value::as_str);
+    let selected = default
+        .and_then(|default| efforts.iter().position(|effort| effort == default))
+        .unwrap_or(0);
+    Ok((name, efforts, selected))
 }
