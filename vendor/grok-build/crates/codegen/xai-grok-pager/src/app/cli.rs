@@ -768,7 +768,7 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
-    /// Initial prompt for the interactive session, e.g. `grok "fix the bug"` or `grok --worktree=feat "create this feature"`.
+    /// Initial prompt for the interactive session, e.g. `seraph "fix the bug"` or `seraph --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",
         conflicts_with_all = &["single",
@@ -841,8 +841,8 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == "seraph")
+            .unwrap_or("seraph")
             .to_owned();
         Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
     }

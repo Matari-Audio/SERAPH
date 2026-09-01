@@ -9117,6 +9117,7 @@ dependencies = [
  "xai-acp-lib",
  "xai-grok-pager",
  "xai-grok-pager-minimal",
+ "xai-grok-tools",
 ]
 
 [[package]]

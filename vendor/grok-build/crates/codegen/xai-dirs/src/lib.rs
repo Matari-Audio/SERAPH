@@ -46,7 +46,7 @@ pub fn home_dir() -> Option<PathBuf> {
 fn grok_home_in(home: &Path) -> PathBuf {
     dunce::canonicalize(home)
         .unwrap_or_else(|_| home.to_path_buf())
-        .join(".grok")
+        .join(".seraph")
 }
 
 /// `$GROK_HOME` verbatim when non-empty, else `<home>/.grok`. The env value is
@@ -71,7 +71,9 @@ pub fn resolve_grok_home() -> Option<PathBuf> {
 /// [`resolve_grok_home`] plus the [`GrokHomeSource`] the path came from.
 pub fn resolve_grok_home_with_source() -> Option<(PathBuf, GrokHomeSource)> {
     resolve_grok_home_from(
-        std::env::var_os("GROK_HOME").as_deref(),
+        std::env::var_os("SERAPH_HOME")
+            .or_else(|| std::env::var_os("GROK_HOME"))
+            .as_deref(),
         home_dir().as_deref(),
     )
 }

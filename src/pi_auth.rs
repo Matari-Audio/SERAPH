@@ -138,6 +138,11 @@ impl PiAuth {
             .collect()
     }
 
+    pub async fn models(&mut self, provider: &str) -> Result<Value> {
+        self.request("models", json!({ "provider": provider }))
+            .await
+    }
+
     pub async fn start_login(&mut self, provider: &str, auth_type: &str) -> Result<u64> {
         self.send(
             "login",

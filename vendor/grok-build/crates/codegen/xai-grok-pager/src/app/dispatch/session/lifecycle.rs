@@ -450,7 +450,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             agent.workspace_mode_cli_locked = locked;
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-        agent.mcp_init_progress = Some(McpInitProgress {
+        agent.mcp_init_progress = (!crate::acp::backend_installed()).then(|| McpInitProgress {
             total: 0,
             connected: 0,
             started_at: Instant::now(),

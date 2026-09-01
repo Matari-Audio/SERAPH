@@ -124,6 +124,50 @@ impl AgentView {
             && !self.modal_owns_input()
             && self.jump_state.is_none()
     }
+
+    pub(crate) fn handle_seraph_empty_prompt_key(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+        registry: &ActionRegistry,
+    ) -> Option<InputOutcome> {
+        if key.kind == KeyEventKind::Release
+            || !key.modifiers.is_empty()
+            || !self.is_empty_focused_prompt()
+        {
+            return None;
+        }
+        match key.code {
+            KeyCode::Down => Some(InputOutcome::Action(Action::OpenDashboard)),
+            KeyCode::Char('?') => {
+                Some(self.handle_agent_action_with_registry(ActionId::ShortcutsHelp, registry))
+            }
+            KeyCode::Char('<') | KeyCode::Char('>') => {
+                let model_id = self.session.models.current.clone()?;
+                let options = self.session.models.reasoning_effort_options();
+                if options.is_empty() {
+                    return None;
+                }
+                let current = self.session.models.reasoning_effort;
+                let index = current
+                    .and_then(|current| options.iter().position(|option| option.value == current))
+                    .unwrap_or(0);
+                let next = if key.code == KeyCode::Char('<') {
+                    index.saturating_sub(1)
+                } else {
+                    (index + 1).min(options.len() - 1)
+                };
+                Some(if next == index {
+                    InputOutcome::Changed
+                } else {
+                    InputOutcome::Action(Action::SwitchModel {
+                        model_id,
+                        effort: Some(options[next].value),
+                    })
+                })
+            }
+            _ => None,
+        }
+    }
     pub(crate) fn workflow_runs_newest_first(
         &self,
     ) -> Vec<&crate::views::workflows::WorkflowRunSnapshot> {

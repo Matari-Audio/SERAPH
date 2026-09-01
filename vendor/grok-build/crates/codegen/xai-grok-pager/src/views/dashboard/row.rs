@@ -107,7 +107,7 @@ pub fn build_rows(
 ///
 /// Like [`build_rows`] with two differences.
 /// It appends "roster-only" rows for leader sessions this client is not locally attached to (the FleetView dashboard).
-/// It does not list subagents as their own rows; only top-level agents and roster sessions appear (see [`build_local_rows`]).
+/// Subagents are shown directly below their parent so the dashboard doubles as the all-agents view.
 ///
 /// Local `AgentView` rows are built first (richest data).
 /// Then, for each [`RosterEntry`] whose `session_id` is not already represented by a local agent, a synthetic [`DashboardRow`] is appended.
@@ -121,7 +121,7 @@ pub fn build_rows_with_roster(
     home: Option<&str>,
     roster: &[RosterEntry],
 ) -> Vec<DashboardRow> {
-    let mut rows = build_local_rows(agents, pinned, home, false);
+    let mut rows = build_local_rows(agents, pinned, home, true);
     append_roster_rows(&mut rows, roster, agents, pinned, home);
     apply_filter(&mut rows, filter, home);
     sort_rows(&mut rows, grouping, reorder);

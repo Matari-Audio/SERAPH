@@ -1082,8 +1082,60 @@ impl PromptWidget {
         let raw_text = self.textarea.text();
         let (clean_text, clean_cursor) =
             strip_all_elements(raw_text, self.textarea.cursor(), &self.textarea);
-        self.slash_controller
-            .refresh(&self.slash_state, &clean_text, clean_cursor, models);
+        let alternate = active_sigil_token(&clean_text, clean_cursor).map(|(sigil, range)| {
+            let mut token = clean_text[range.clone()].to_owned();
+            token.replace_range(..1, "/");
+            (sigil, range.start, token)
+        });
+        self.slash_controller.refresh(
+            &self.slash_state,
+            alternate
+                .as_ref()
+                .map(|(_, _, text)| text.as_str())
+                .unwrap_or(&clean_text),
+            alternate
+                .as_ref()
+                .map(|(_, start, text)| clean_cursor.saturating_sub(*start).min(text.len()))
+                .unwrap_or(clean_cursor),
+            models,
+        );
+
+        if let Some((sigil, start, _)) = alternate {
+            let replacement = if sigil == '$' { "$" } else { "#" };
+            let registry = self.slash_controller.registry();
+            self.slash_state.update(|snapshot| {
+                snapshot.inline_ghost = None;
+                snapshot.matches.retain(|row| {
+                    let name = row.command_name();
+                    if sigil == '$' {
+                        registry.get(name).is_some_and(|command| command.is_skill())
+                    } else {
+                        matches!(name, "login" | "settings" | "model")
+                    }
+                });
+                for row in &mut snapshot.matches {
+                    row.display.replace_range(..1, replacement);
+                    row.insert_text.replace_range(..1, replacement);
+                }
+                snapshot.open = !snapshot.matches.is_empty();
+                snapshot.selected = snapshot
+                    .selected
+                    .min(snapshot.matches.len().saturating_sub(1));
+                for range in snapshot
+                    .command_range
+                    .iter_mut()
+                    .chain(snapshot.args_range.iter_mut())
+                    .chain(snapshot.recognized_tokens.iter_mut())
+                {
+                    range.start += start;
+                    range.end += start;
+                }
+                if let Some(ghost) = snapshot.inline_ghost.as_mut() {
+                    ghost.token_range.start += start;
+                    ghost.token_range.end += start;
+                }
+            });
+        }
 
         self.slash_state.update(|snap| {
             remap_slash_snapshot_to_raw(snap, raw_text, &self.textarea);
@@ -1099,6 +1151,41 @@ impl PromptWidget {
             // Left the args phase (e.g., user deleted text): cancel preview
             self.slash_cancel_preview();
         }
+    }
+
+    pub(crate) fn active_sigil(&self) -> Option<char> {
+        active_sigil_token(self.textarea.text(), self.textarea.cursor()).map(|(sigil, _)| sigil)
+    }
+
+    pub(crate) fn take_hash_command(
+        &mut self,
+        models: &crate::acp::model_state::ModelState,
+    ) -> Option<String> {
+        if self.active_sigil() != Some('#') {
+            return None;
+        }
+        let snapshot = self.slash_state.snapshot();
+        let command = snapshot.selection()?.command_name().to_owned();
+        if !matches!(command.as_str(), "login" | "settings" | "model") {
+            return None;
+        }
+        let mut range = snapshot.command_range?;
+        let text = self.textarea.text();
+        if let Some(next) = text[range.end..]
+            .chars()
+            .next()
+            .filter(|ch| ch.is_whitespace())
+        {
+            range.end += next.len_utf8();
+        } else if let Some((offset, previous)) = text[..range.start].char_indices().next_back()
+            && previous.is_whitespace()
+        {
+            range.start = offset;
+        }
+        self.textarea.replace_range(range, "");
+        self.slash_close();
+        self.refresh_slash(models);
+        Some(command)
     }
 
     /// Sync ACP-advertised commands and the agent toolset into the slash registry, then refresh the snapshot.
@@ -3566,6 +3653,59 @@ fn remap_slash_snapshot_to_raw(
     if let Some(ref mut ghost) = snap.inline_ghost {
         ghost.token_range = map_clean_range_to_raw(text, ghost.token_range.clone(), textarea);
     }
+}
+
+fn active_sigil_token(text: &str, cursor: usize) -> Option<(char, std::ops::Range<usize>)> {
+    let cursor = cursor.min(text.len());
+    let start = text[..cursor]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(offset, ch)| offset + ch.len_utf8())
+        .unwrap_or(0);
+    let sigil = text[start..].chars().next()?;
+    if !matches!(sigil, '$' | '#') {
+        return None;
+    }
+    let end = text[start..]
+        .char_indices()
+        .find(|(offset, ch)| *offset > 0 && ch.is_whitespace())
+        .map(|(offset, _)| start + offset)
+        .unwrap_or(text.len());
+    if sigil == '$' && !dollar_query_is_completable(&text[start + 1..end]) {
+        return None;
+    }
+    (cursor <= end).then_some((sigil, start..end))
+}
+
+// Adapted from OpenAI Codex's Apache-2.0 composer completion target.
+fn dollar_query_is_completable(query: &str) -> bool {
+    let name_end = query
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':'))
+        .count();
+    let name = &query[..name_end];
+    let common_env = matches!(
+        name.to_ascii_uppercase().as_str(),
+        "PATH"
+            | "HOME"
+            | "USER"
+            | "SHELL"
+            | "PWD"
+            | "TMPDIR"
+            | "TEMP"
+            | "TMP"
+            | "LANG"
+            | "TERM"
+            | "XDG_CONFIG_HOME"
+    );
+    !name.is_empty()
+        && !(name.bytes().all(|byte| !byte.is_ascii_lowercase()) && common_env)
+        && !name.bytes().all(|byte| byte.is_ascii_digit())
+        && !matches!(name, "-" | "_")
+        && !name.as_bytes()[0].is_ascii_digit()
+        && !name.starts_with('-')
+        || query.is_empty()
 }
 
 /// Build a `[<label>]` chip line with the shared chip styling (dim brackets, paste foreground/background).

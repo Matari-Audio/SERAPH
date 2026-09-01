@@ -150,7 +150,11 @@ impl SuggestionRow {
 
     /// Bare command name from a command-row `display` (strips leading `/`).
     pub(crate) fn command_name(&self) -> &str {
-        self.display.strip_prefix('/').unwrap_or(&self.display)
+        self.display
+            .strip_prefix('/')
+            .or_else(|| self.display.strip_prefix('$'))
+            .or_else(|| self.display.strip_prefix('#'))
+            .unwrap_or(&self.display)
     }
 }
 

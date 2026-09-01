@@ -1134,9 +1134,9 @@ fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write)
     }
     let _ = writeln!(w, "Resume this session with:");
     if info.minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {}", info.session_id);
+        let _ = writeln!(w, "  seraph --minimal --resume {}", info.session_id);
     } else {
-        let _ = writeln!(w, "  grok --resume {}", info.session_id);
+        let _ = writeln!(w, "  seraph --resume {}", info.session_id);
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).

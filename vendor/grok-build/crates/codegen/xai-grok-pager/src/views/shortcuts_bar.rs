@@ -259,34 +259,26 @@ impl Widget for ShortcutsBar<'_> {
         let effective = compute_effective_hints(self.hints, self.compact.as_ref());
 
         for (i, hint) in effective.iter().enumerate() {
+            let separator_width = if i > 0 { 5 } else { 0 };
+            let hint_width = hint.bar_key_display().width() as u16 + 1 + hint.label.width() as u16;
+            if x + separator_width + hint_width > area.x + area.width {
+                break;
+            }
             if i > 0 {
                 let sep = Span::styled("  │  ", sep_style);
                 let sep_width = 5u16;
-                if x + sep_width > area.x + area.width {
-                    break;
-                }
                 buf.set_span(x, area.y, &sep, sep_width);
                 x += sep_width;
             }
 
-            let key_width = hint.bar_key_display().width() as u16;
-            if x + key_width > area.x + area.width {
-                break;
-            }
             x = paint_hint_keys(buf, x, area.y, hint, key_style, action_style);
 
             let colon = Span::styled(":", action_style);
-            if x + 1 > area.x + area.width {
-                break;
-            }
             buf.set_span(x, area.y, &colon, 1);
             x += 1;
 
             let action_span = Span::styled(hint.label.as_ref(), action_style);
             let action_width = hint.label.width() as u16;
-            if x + action_width > area.x + area.width {
-                break;
-            }
             buf.set_span(x, area.y, &action_span, action_width);
             x += action_width;
         }

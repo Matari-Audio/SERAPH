@@ -2600,6 +2600,15 @@ impl AppView {
                     .is_some_and(|d| d.attached_agent == Some(id));
                 if !overlay_active
                     && let Event::Key(key) = ev
+                    && let Some(outcome) = self
+                        .agents
+                        .get_mut(&id)
+                        .and_then(|agent| agent.handle_seraph_empty_prompt_key(key, &self.registry))
+                {
+                    return outcome;
+                }
+                if !overlay_active
+                    && let Event::Key(key) = ev
                     && key.kind != KeyEventKind::Release
                 {
                     match self
