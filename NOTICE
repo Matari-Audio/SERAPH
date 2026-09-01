@@ -1,0 +1,17 @@
+SERAPH
+Copyright 2026 Matari Audio
+
+This product includes software adapted from Grok Build
+(https://github.com/xai-org/grok-build), Copyright 2023-2026 SpaceXAI,
+licensed under the Apache License, Version 2.0.
+
+Imported from GitHub revision bb7f39d5858cbf5e00de639367f59debbdcb0138,
+whose SOURCE_REV identifies monorepo revision
+d761e8ba538084df023de79d26892eaf73ed7411.
+
+The Grok Build sources have been modified to connect the pager UI to SERAPH's
+ACP backend and to use SERAPH authentication, models, tools, and agent runtime.
+SpaceXAI and xAI do not endorse SERAPH.
+
+Additional third-party notices are in THIRD-PARTY-NOTICES and the NOTICE files
+within vendor/grok-build.

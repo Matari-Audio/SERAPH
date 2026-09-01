@@ -1,19 +1,28 @@
 [package]
 name = "seraph"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+license = "Apache-2.0"
+
+[patch.crates-io]
+async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "95b52ebdedf42143083cf3d6f0e0be7c84e9c808" }
 
 [dependencies]
+agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
 anyhow = "1.0"
+async-trait = "0.1"
 bytes = "1.10"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 processkit = { version = "3.3.4", default-features = false }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
 ratatui-textarea = "0.9.2"
-rusqlite = "0.40.2"
+rusqlite = "0.37"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.53", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 webbrowser = "1.2"
+xai-acp-lib = { path = "vendor/grok-build/crates/codegen/xai-acp-lib" }
+xai-grok-pager = { path = "vendor/grok-build/crates/codegen/xai-grok-pager", default-features = false }
+xai-grok-pager-minimal = { path = "vendor/grok-build/crates/codegen/xai-grok-pager-minimal" }

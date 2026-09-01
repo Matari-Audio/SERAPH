@@ -50,6 +50,12 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+impl ToolCall {
+    pub fn id_string(&self) -> String {
+        self.id.to_string()
+    }
+}
+
 pub struct ToolResult {
     pub text: String,
     pub success: bool,

@@ -2,7 +2,7 @@
 
 Stateful Execution Runtime for Agentic Programmatic Harness.
 
-SERAPH is an independent Rust and Ratatui agent harness that programs a persistent Python execution environment while keeping capabilities, artifacts, workflows, and agent coordination outside the model context until needed.
+SERAPH is a Rust agent harness using Grok Build's actual Apache-2.0 pager UI with a SERAPH ACP backend. It programs a persistent Python execution environment while keeping capabilities, artifacts, workflows, and agent coordination outside the model context until needed.
 
 Install on macOS or Linux:
 
@@ -16,9 +16,9 @@ or a source checkout. Node.js 22.19+ and Python 3.11+ remain runtime requirement
 Re-run the same command to update atomically; previous releases remain under
 `~/.local/share/seraph/releases`. For development, use `npm ci && cargo run`.
 
-Prime/Pi's production `ModelRuntime` owns ChatGPT login, locked credential storage, and token refresh in `~/.seraph/auth.json`. SERAPH passes only short-lived access tokens to an isolated installed `codex app-server`; Codex never receives Pi's refresh token. Press `L`, choose Pi's browser or headless device-code flow, and complete the Prime-style login pane. Browser login includes Pi's manual redirect/code fallback. Use `<` and `>` on an empty composer to change reasoning effort, `↓` or `Ctrl+G` to open All Agents, `?` for help, and `Ctrl+C` to quit.
+Prime/Pi's production `ModelRuntime` owns ChatGPT login, locked credential storage, and token refresh in `~/.seraph/auth.json`. SERAPH passes only short-lived access tokens to an isolated installed `codex app-server`; Codex never receives Pi's refresh token. On first launch, press `l` on Grok's welcome screen and complete Pi's browser login. Grok's composer, dashboard, settings, themes, shortcuts, animations, and terminal renderer are used directly rather than recreated.
 
-The dock above the composer uses Grok Build's Dock V2 renderer and GrokNight primitives. Press `Tab` on an empty composer to focus it, navigate with arrows, and press `Enter` to collapse a section or open a subagent. Task state is read from the project SQLite board, so claims and completions made by child-agent processes appear without entering the conversation context.
+SERAPH's dynamic tools provide the persistent Python kernel, reversible exact edits, shared SQLite task coordination, parallel child agents, interruption, follow-ups, waits, and inter-agent mailboxes. Tool execution is projected into Grok's native tool-call cards instead of dumping raw output into the conversation.
 
 The model can call SERAPH's persistent Python kernel as `seraph.python`. The standalone kernel path remains available:
 

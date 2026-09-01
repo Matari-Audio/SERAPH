@@ -38,6 +38,7 @@ jobs:
           mkdir package
           cp target/release/seraph package/
           cp -R auth node_modules package/
+          cp LICENSE NOTICE THIRD-PARTY-NOTICES package/
           printf '%s\n' "${GITHUB_REF_NAME}" > package/VERSION
           tar -czf "seraph-${{ matrix.target }}.tar.gz" -C package .
           if command -v sha256sum >/dev/null; then

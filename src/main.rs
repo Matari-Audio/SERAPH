@@ -4,6 +4,7 @@ mod codex;
 mod grok_ui;
 mod kernel;
 mod pi_auth;
+mod seraph_acp;
 mod tasks;
 mod tui;
 
@@ -112,30 +113,39 @@ async fn run() -> Result<()> {
 }
 
 async fn run_chat() -> Result<()> {
-    let (events, event_rx) = mpsc::channel(64);
-    let (commands, command_rx) = mpsc::channel(16);
-    let controller_events = events.clone();
-    let mut controller = tokio::spawn(async move {
-        let result = run_controller(events, command_rx).await;
-        if let Err(error) = &result {
-            let _ = controller_events
-                .send(UiEvent::Error(format!("{error:#}")))
-                .await;
-        }
-        result
-    });
-    let ui_result = tui::run(event_rx, commands.clone()).await;
-    let _ = commands.try_send(UiCommand::Quit);
-    if let Err(error) = ui_result {
-        controller.abort();
-        return Err(error);
-    }
-    match tokio::time::timeout(Duration::from_secs(2), &mut controller).await {
-        Ok(result) => result.context("join SERAPH controller")?,
-        Err(_) => {
+    xai_grok_pager::acp::install_backend(seraph_acp::spawn);
+    xai_grok_pager_minimal::install();
+    let args = xai_grok_pager::app::PagerArgs::parse_cli();
+    xai_grok_pager::app::run(args, None).await?;
+    return Ok(());
+
+    #[allow(unreachable_code)]
+    {
+        let (events, event_rx) = mpsc::channel(64);
+        let (commands, command_rx) = mpsc::channel(16);
+        let controller_events = events.clone();
+        let mut controller = tokio::spawn(async move {
+            let result = run_controller(events, command_rx).await;
+            if let Err(error) = &result {
+                let _ = controller_events
+                    .send(UiEvent::Error(format!("{error:#}")))
+                    .await;
+            }
+            result
+        });
+        let ui_result = tui::run(event_rx, commands.clone()).await;
+        let _ = commands.try_send(UiCommand::Quit);
+        if let Err(error) = ui_result {
             controller.abort();
-            let _ = controller.await;
-            Ok(())
+            return Err(error);
+        }
+        match tokio::time::timeout(Duration::from_secs(2), &mut controller).await {
+            Ok(result) => result.context("join SERAPH controller")?,
+            Err(_) => {
+                controller.abort();
+                let _ = controller.await;
+                Ok(())
+            }
         }
     }
 }
