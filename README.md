@@ -4,12 +4,16 @@ Stateful Execution Runtime for Agentic Programmatic Harness.
 
 SERAPH is an independent Rust and Ratatui agent harness that programs a persistent Python execution environment while keeping capabilities, artifacts, workflows, and agent coordination outside the model context until needed.
 
-Install the Rust and Pi runtime dependencies, then start SERAPH:
+Install on macOS or Linux:
 
 ```sh
-npm install
-cargo run
+curl -fsSL https://raw.githubusercontent.com/Matari-Audio/SERAPH/main/install.sh | sh
 ```
+
+The installer requires Git, Rust/Cargo, Node.js 22.19+, and Python 3.11+. It
+installs SERAPH, Pi's authentication runtime, and the supported Codex CLI under
+`~/.local/share/seraph`, then places `seraph` in `~/.local/bin`. Re-run the same
+command to update. For a development checkout, use `npm ci && cargo run`.
 
 Prime/Pi's production `ModelRuntime` owns ChatGPT login, locked credential storage, and token refresh in `~/.seraph/auth.json`. SERAPH passes only short-lived access tokens to an isolated installed `codex app-server`; Codex never receives Pi's refresh token. Press `L`, choose Pi's browser or headless device-code flow, and complete the Prime-style login pane. Browser login includes Pi's manual redirect/code fallback. Use `<` and `>` on an empty composer to change reasoning effort, `↓` or `Ctrl+G` to open All Agents, `?` for help, and `Ctrl+C` to quit.
 
