@@ -7,18 +7,20 @@ mod pi_auth;
 mod tasks;
 mod tui;
 
-use std::{env, path::PathBuf, process::ExitCode, thread, time::Duration};
+use std::{collections::BTreeMap, env, path::PathBuf, process::ExitCode, thread, time::Duration};
 
 use agents::AgentManager;
 use anyhow::{Context, Result, bail};
 use codex::{Codex, CodexEvent, LoginEvent, ToolResult};
 use kernel::Kernel;
+use seraph::edit_patch::{AppliedPatch, apply_prepared_edits, prepare_exact_patch};
 use serde_json::{Value, json};
 use tasks::TaskBoard;
 use tokio::{io::AsyncReadExt, sync::mpsc};
 use tui::{UiCommand, UiEvent};
 
 const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+const MAX_EDIT_PATCH_BYTES: usize = 512 * 1024;
 const MAX_AGENT_RESULT_BYTES: usize = 2 * 1024;
 const MAX_AGENT_MESSAGE_BYTES: usize = 16 * 1024;
 
@@ -31,6 +33,8 @@ enum LoginOutcome {
 struct ToolHost {
     kernel: Option<Kernel>,
     task_board: Option<TaskBoard>,
+    edits: BTreeMap<u64, AppliedPatch>,
+    next_edit_handle: u64,
     project: PathBuf,
     agents: AgentManager,
 }
@@ -146,6 +150,8 @@ async fn run_headless_agent(prompt: &str) -> Result<()> {
     let mut tools = ToolHost {
         kernel: None,
         task_board: None,
+        edits: BTreeMap::new(),
+        next_edit_handle: 1,
         project: project.clone(),
         agents: AgentManager::new(project, None)?,
     };
@@ -231,6 +237,8 @@ async fn run_controller(
     let mut tools = ToolHost {
         kernel: None,
         task_board: None,
+        edits: BTreeMap::new(),
+        next_edit_handle: 1,
         project: cwd.clone(),
         agents: AgentManager::new(cwd.clone(), Some(events.clone()))?,
     };
@@ -630,6 +638,9 @@ async fn execute_tool(
             "Coordination",
         );
     }
+    if tool == "edit" {
+        return execute_edit(host, arguments);
+    }
     if tool != "python" {
         bail!("unknown dynamic tool seraph.{tool}");
     }
@@ -655,6 +666,71 @@ async fn execute_tool(
         "truncated": output.truncated,
     }))?;
     bounded_projection(projection, "Python")
+}
+
+fn execute_edit(host: &mut ToolHost, arguments: &Value) -> Result<String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .context("seraph.edit requires an action")?;
+    if action == "rollback" {
+        let handle = arguments
+            .get("handle")
+            .and_then(Value::as_u64)
+            .filter(|handle| *handle > 0)
+            .context("rollback requires a positive integer handle")?;
+        host.edits
+            .get(&handle)
+            .with_context(|| format!("unknown session rollback handle {handle}"))?
+            .rollback()?;
+        host.edits.remove(&handle);
+        return bounded_projection(
+            json!({ "rolled_back": handle, "handle_scope": "session" }).to_string(),
+            "Edit",
+        );
+    }
+    if action != "apply" {
+        bail!("unknown seraph.edit action {action:?}");
+    }
+    let patch = arguments
+        .get("patch")
+        .and_then(Value::as_str)
+        .context("seraph.edit requires a string patch argument")?;
+    if patch.len() > MAX_EDIT_PATCH_BYTES {
+        bail!("edit patch exceeds 512 KiB");
+    }
+    let project = host
+        .project
+        .canonicalize()
+        .context("resolve edit project root")?;
+    let edits = prepare_exact_patch(&project, patch)?;
+    let changed: Vec<_> = edits
+        .iter()
+        .map(|edit| {
+            json!({
+                "path": edit.target.strip_prefix(&project).unwrap_or(&edit.target),
+                "before_bytes": edit.expected.len(),
+                "after_bytes": edit.next.len(),
+            })
+        })
+        .collect();
+    let handle = host.next_edit_handle;
+    let next_handle = handle
+        .checked_add(1)
+        .context("rollback handle space exhausted")?;
+    let summary = bounded_projection(
+        json!({
+            "changed": changed,
+            "rollback_handle": handle,
+            "handle_scope": "session",
+        })
+        .to_string(),
+        "Edit",
+    )?;
+    let applied = apply_prepared_edits(&project, &edits)?;
+    host.edits.insert(handle, applied);
+    host.next_edit_handle = next_handle;
+    Ok(summary)
 }
 
 async fn execute_agents(manager: &AgentManager, arguments: &Value) -> Result<Value> {

@@ -164,7 +164,7 @@ impl Codex {
             "cwd": cwd,
             "approvalPolicy": "never",
             "sandbox": "read-only",
-            "developerInstructions": "Use seraph.python for local computation and explicit data reduction. Only values passed to emit() return to the model. Do not mutate files from Python.",
+            "developerInstructions": "Use seraph.python for local computation, validation, build commands, and explicit data reduction. Only values passed to emit() return to the model. Use seraph.edit for every source-file mutation.",
             "dynamicTools": [{
                 "type": "namespace",
                 "name": "seraph",
@@ -182,6 +182,32 @@ impl Codex {
                             }
                         },
                         "required": ["code"],
+                        "additionalProperties": false
+                    }
+                }, {
+                    "type": "function",
+                    "name": "edit",
+                    "description": "Apply a strict update-only Codex patch or roll it back with a session-scoped handle",
+                    "deferLoading": true,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["apply", "rollback"]
+                            },
+                            "patch": {
+                                "type": "string",
+                                "maxLength": 524288,
+                                "description": "A complete *** Begin Patch to *** End Patch document"
+                            },
+                            "handle": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Session-scoped rollback handle returned by apply"
+                            }
+                        },
+                        "required": ["action"],
                         "additionalProperties": false
                     }
                 }, {
