@@ -61,7 +61,17 @@ impl PiAuth {
     pub async fn spawn() -> Result<Self> {
         let script = env::var_os("SERAPH_PI_AUTH")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("auth/pi-auth.mjs"));
+            .unwrap_or_else(|| {
+                let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("auth/pi-auth.mjs");
+                if source.is_file() {
+                    source
+                } else {
+                    env::current_exe()
+                        .ok()
+                        .and_then(|path| path.parent().map(|path| path.join("auth/pi-auth.mjs")))
+                        .unwrap_or(source)
+                }
+            });
         let mut child = Command::new("node")
             .arg(script)
             .stdin(Stdio::piped())
