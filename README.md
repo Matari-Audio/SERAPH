@@ -12,7 +12,7 @@ cargo run
 
 SERAPH uses the installed `codex app-server` for ChatGPT authentication, model discovery, and streaming. Existing Codex login state is reused without exposing tokens to SERAPH; when signed out, press `L` to start the official browser login. Use `<` and `>` on an empty composer to change reasoning effort, `↓` or `Ctrl+G` to open All Agents, `?` for help, and `Ctrl+C` to quit.
 
-The Grok-style dock above the composer shows live subagents and shared coordination tasks. Task state is read from the project SQLite board, so claims and completions made by child-agent processes appear without entering the conversation context.
+The dock above the composer uses Grok Build's Dock V2 renderer and GrokNight primitives. Press `Tab` on an empty composer to focus it, navigate with arrows, and press `Enter` to collapse a section or open a subagent. Task state is read from the project SQLite board, so claims and completions made by child-agent processes appear without entering the conversation context.
 
 The model can call SERAPH's persistent Python kernel as `seraph.python`. The standalone kernel path remains available:
 

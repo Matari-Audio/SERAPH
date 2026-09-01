@@ -5,7 +5,8 @@ colors:
   canvas: "#141414"
   panel: "#242424"
   text: "#e1e1e1"
-  muted: "#848484"
+  muted: "#6c6c6c"
+  section-label: "#787878"
   command-blue: "#7aa2f7"
   agent-violet: "#bb9af7"
   connected-green: "#9ece6a"
@@ -48,7 +49,7 @@ components:
 
 **Creative North Star: "The Quiet Agent Workbench"**
 
-SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: dark GrokNight neutrals, a flat transcript, Dock V2, compact status chrome, and a rounded prompt. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.
+SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: GrokNight theme and glyph primitives plus Dock V2 are ported directly from Grok Build, then modified for SERAPH’s agents and shared tasks. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.
 
 The interface is dense without feeling crowded. Color is reserved for identity, state, and action; structure comes from terminal rows, alignment, whitespace, and sparse borders rather than panels around every region.
 
@@ -56,6 +57,7 @@ The interface is dense without feeling crowded. Color is reserved for identity, 
 
 - Near-black full-screen canvas with no ornamental backdrop.
 - Flat, dominant transcript above a bounded live subagent-and-task dock.
+- Empty dock sections disappear; visible sections become keyboard-focusable from the composer.
 - Rounded composer and help chrome; roster sections use top rules only.
 - Agent state stays visible in the shell and expands into a keyboard-first roster.
 - Terminal-native typography, spacing, glyphs, and motion.
@@ -84,7 +86,8 @@ GrokNight neutrals carry the workspace; restrained TokyoNight accents encode act
 - **Canvas Black** (`#141414`): The uninterrupted application background.
 - **Selection Charcoal** (`#242424`): Selected roster rows and subtle border structure.
 - **Primary Text** (`#e1e1e1`): Transcript copy, titles, prompts, and selected content.
-- **Muted Text** (`#848484`): Paths, counts, account state, hints, result previews, and supporting copy.
+- **Muted Text** (`#6c6c6c`): Paths, counts, account state, hints, result previews, and supporting copy.
+- **Section Label** (`#787878`): Bold Dock V2 header labels and the selected subagent’s open indicator.
 - **Composer Border** (`#505058`): The rounded prompt outline.
 - **Footer Divider** (`#585858`): Compact separators between footer controls.
 
@@ -110,7 +113,7 @@ GrokNight neutrals carry the workspace; restrained TokyoNight accents encode act
 
 ## Layout
 
-The chat shell is a five-band vertical layout: a one-row header, a transcript that consumes all remaining height, a variable-height Grok Dock V2, a three-row composer, and a one-row footer. The dock always reserves one Subagents header, adds at most two child rows and one overflow row, then adds a Tasks header, at most two task rows, and one overflow row only when tasks exist. Its height is capped against terminal height so at least one transcript row remains. The header pairs project identity on the left with main and up to four agent indicators on the right; overflow becomes a muted `+N`. The transcript auto-scrolls to its latest wrapped line.
+The chat shell is a five-band vertical layout: a one-row header, a transcript that consumes all remaining height, a variable-height Grok Dock V2, a three-row composer, and a one-row footer. Empty dock sections—including Subagents—consume no rows. Each nonempty expanded section adds one header, at most two data rows, and one overflow row; a collapsed section keeps only its header. Dock height, rendered rows, and keyboard cursor order come from the same donor-derived row walk. The dock height is capped against terminal height so at least one transcript row remains. The header pairs project identity on the left with main and up to four agent indicators on the right; overflow becomes a muted `+N`. The transcript auto-scrolls to its latest wrapped line.
 
 The All Agents surface uses a two-row header, a Current project region at 52% of the remaining body, an Other projects region filling the balance, and a one-row footer. The main conversation is always the first row. Agent rows window around the current selection, and a selected agent with a result gains one indented preview row. Alignment gaps expand to terminal width; when content cannot fit, the layout preserves at least one separating cell.
 
@@ -124,7 +127,7 @@ There are no shadows. Depth is flat and structural: the selected agent row uses 
 
 ## Shapes
 
-The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock headers extend a straight divider across unused width; All Agents groups use only a straight top border. Transcript messages, headers, status rails, dock rows, and roster rows remain unboxed. Status is expressed with compact terminal glyphs: `●` for complete or failed, `○` for other idle agent states, a four-frame glyph spinner for running agents, and `◆` / `◇` for active / other task states.
+The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock headers extend a straight divider across unused width; All Agents groups use only a straight top border. Transcript messages, headers, status rails, dock rows, and roster rows remain unboxed. Status is expressed with Grok glyph primitives: `●` for complete or failed, `○` for other idle agent states, the eight-frame `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧` spinner for running agents, and `◆` / `◇` for active / other task states.
 
 **The One Enclosure Rule.** The composer is the persistent enclosure; do not turn transcript messages or agent rows into cards.
 
@@ -145,11 +148,13 @@ The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock head
 
 ### Grok Dock V2
 
-- **Subagents Header:** Always visible as muted `▾`, bold label, muted count, a divider filling unused width, and the blue `↓ all agents` action.
-- **Subagent Rows:** Show at most two live children. Each row carries a colored status glyph and agent ID, a one-line prompt truncated with an ellipsis when needed, and muted status aligned right. Additional children collapse to muted `▾ N more`.
-- **Tasks Section:** Hidden when the shared task total is zero. Otherwise it shows a header, at most two task rows, and muted `▾ N more` overflow.
+- **Headers:** Every empty section, including Subagents, is hidden. A nonempty header uses muted `▾` / `▸`, a bold bright-gray label, muted count, and a dim divider filling unused width.
+- **Subagent Rows:** An expanded section shows at most two live children. Each row carries a colored status glyph and agent ID, a one-line prompt clipped at the terminal edge, and muted status when it fits. Additional children collapse to muted `▾ N more`.
+- **Tasks Section:** Hidden when the shared task total is zero. Otherwise its expanded state shows at most two task rows and muted `▾ N more` overflow.
 - **Task Rows:** Pair the task glyph and `#id` with a one-line subject; owner or `unclaimed` plus status aligns right. Active is violet `◆`, completed green `●`, failed red `●`, and other states amber `◇`.
-- **Behavior:** Task state refreshes cross-process from shared SQLite without entering conversation context. Down or Ctrl+G still opens the Prime-style All Agents view.
+- **Focus:** Tab on an empty composer focuses the first visible dock item. Up/Down or `j`/`k` follows the shared visible-row order; overflow rows are not focus targets. The focused row uses Selection Charcoal.
+- **Activation:** Enter toggles a Subagents or Tasks header. Enter on a subagent row opens that child in the Prime-style All Agents view and shows `[↗]` while focused. Esc or Tab returns focus to the composer.
+- **Behavior:** Task state refreshes cross-process from shared SQLite without entering conversation context. Down or Ctrl+G still opens the Prime-style All Agents view directly.
 
 ### Composer
 
@@ -182,7 +187,8 @@ The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock head
 
 ### Do:
 
-- **Do** keep chat dominant while exposing at most two subagents and two shared tasks in Dock V2.
+- **Do** hide every empty dock section and expose at most two rows per expanded section.
+- **Do** derive dock height, rendering, and cursor order from one shared visible-row walk.
 - **Do** use the exact status mapping: violet running, green completed, red failed, amber other.
 - **Do** keep shared SQLite task updates out of conversation context.
 - **Do** preserve terminal-cell alignment, keyboard navigation, and the selected agent’s one-line result preview.

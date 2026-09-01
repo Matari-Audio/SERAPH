@@ -30,9 +30,11 @@ SOFTWARE.
 
 ## xAI Grok Build terminal UI
 
-The terminal color constants, flat transcript, prompt chrome, status rail, agent
-status icons, roster interaction patterns, and Subagents/Tasks dock in
-`src/tui.rs` are adapted from Grok Build at commit
+The terminal shell in `src/tui.rs` and the modified GrokNight theme, glyph, and
+Dock V2 production code in `src/grok_ui.rs` are adapted from
+`xai-grok-pager-render/src/theme/groknight.rs`,
+`xai-grok-pager-render/src/glyphs.rs`, and `xai-grok-pager/src/views/dock.rs`
+in Grok Build at commit
 `bb7f39d5858cbf5e00de639367f59debbdcb0138`, copyright 2023-2026 SpaceXAI,
 under the Apache License 2.0:
 `LICENSES/GROK-BUILD-APACHE-2.0.txt`.
