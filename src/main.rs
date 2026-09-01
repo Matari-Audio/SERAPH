@@ -1,21 +1,31 @@
 mod capability;
 mod codex;
 mod kernel;
+mod tasks;
 mod tui;
 
-use std::{env, process::ExitCode, time::Duration};
+use std::{env, path::PathBuf, process::ExitCode, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use codex::{Codex, CodexEvent, ToolResult};
 use kernel::Kernel;
 use serde_json::{Value, json};
+use tasks::TaskBoard;
 use tokio::sync::mpsc;
 use tui::{UiCommand, UiEvent};
+
+const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 
 enum LoginOutcome {
     Complete,
     Cancelled,
     Quit,
+}
+
+struct ToolHost {
+    kernel: Kernel,
+    task_board: Option<TaskBoard>,
+    project: PathBuf,
 }
 
 #[tokio::main]
@@ -119,7 +129,11 @@ async fn run_controller(
     } else {
         None
     };
-    let kernel = Kernel::spawn().await?;
+    let mut tools = ToolHost {
+        kernel: Kernel::spawn().await?,
+        task_board: None,
+        project: cwd.clone(),
+    };
     events.send(UiEvent::Ready(thread.is_some())).await?;
 
     while let Some(command) = commands.recv().await {
@@ -163,7 +177,7 @@ async fn run_controller(
                 };
                 match run_turn(
                     &mut codex,
-                    &kernel,
+                    &mut tools,
                     &events,
                     &mut commands,
                     thread_id,
@@ -181,7 +195,7 @@ async fn run_controller(
         }
     }
 
-    kernel.shutdown().await?;
+    tools.kernel.shutdown().await?;
     codex.shutdown().await
 }
 
@@ -248,7 +262,7 @@ async fn login(
 
 async fn run_turn(
     codex: &mut Codex,
-    kernel: &Kernel,
+    tools: &mut ToolHost,
     ui: &mpsc::Sender<UiEvent>,
     commands: &mut mpsc::Receiver<UiCommand>,
     thread_id: &str,
@@ -287,15 +301,20 @@ async fn run_turn(
                     Quit,
                 }
                 let result = {
-                    let execution =
-                        execute_tool(kernel, &call.namespace, &call.tool, &call.arguments);
+                    let execution = execute_tool(
+                        tools,
+                        &call.thread_id,
+                        &call.namespace,
+                        &call.tool,
+                        &call.arguments,
+                    );
                     tokio::pin!(execution);
                     loop {
                         tokio::select! {
                             result = &mut execution => break ToolOutcome::Complete(result),
                             command = commands.recv() => match command {
                                 Some(UiCommand::Quit) | None => break ToolOutcome::Quit,
-                                Some(_) => ui.send(UiEvent::Notice("Python is still running.".into())).await?,
+                                Some(_) => ui.send(UiEvent::Notice("The tool is still running.".into())).await?,
                             }
                         }
                     }
@@ -305,7 +324,7 @@ async fn run_turn(
                         .respond_tool(
                             call,
                             ToolResult {
-                                text: "Turn interrupted before Python completed.".into(),
+                                text: "Turn interrupted before tool execution completed.".into(),
                                 success: false,
                             },
                         )
@@ -322,7 +341,7 @@ async fn run_turn(
                                 success: true,
                             },
                             Err(error) => ToolResult {
-                                text: format!("{error:#}"),
+                                text: bounded_error(&error),
                                 success: false,
                             },
                         },
@@ -378,22 +397,41 @@ async fn interrupt_turn(codex: &mut Codex, thread_id: &str, turn_id: &str) -> Re
 }
 
 async fn execute_tool(
-    kernel: &Kernel,
+    host: &mut ToolHost,
+    caller: &str,
     namespace: &Option<String>,
     tool: &str,
     arguments: &Value,
 ) -> Result<String> {
-    if namespace.as_deref() != Some("seraph") || tool != "python" {
+    if namespace.as_deref() != Some("seraph") {
         bail!(
             "unknown dynamic tool {}.{tool}",
             namespace.as_deref().unwrap_or("")
         );
     }
+    if tool == "coordination" {
+        if host.task_board.is_none() {
+            host.task_board = Some(TaskBoard::open(&host.project)?);
+        }
+        return bounded_projection(
+            execute_coordination(
+                host.task_board
+                    .as_mut()
+                    .expect("task board was initialized"),
+                caller,
+                arguments,
+            )?,
+            "Coordination",
+        );
+    }
+    if tool != "python" {
+        bail!("unknown dynamic tool seraph.{tool}");
+    }
     let code = arguments
         .get("code")
         .and_then(Value::as_str)
         .context("seraph.python requires a string code argument")?;
-    let output = kernel.execute(code).await?;
+    let output = host.kernel.execute(code).await?;
     let projection = serde_json::to_string(&json!({
         "emitted": output.emitted,
         "stdout_bytes": output.stdout.len(),
@@ -402,10 +440,121 @@ async fn execute_tool(
         "background_stderr_bytes": output.background_stderr.len(),
         "truncated": output.truncated,
     }))?;
-    if projection.len() > 32 * 1024 {
-        bail!("Python projection exceeded 32 KiB; emit a smaller filtered result");
+    bounded_projection(projection, "Python")
+}
+
+fn bounded_projection(projection: String, source: &str) -> Result<String> {
+    if projection.len() > MAX_TOOL_RESULT_BYTES {
+        bail!("{source} projection exceeded 32 KiB; request a smaller result");
     }
     Ok(projection)
+}
+
+fn execute_coordination(board: &mut TaskBoard, caller: &str, arguments: &Value) -> Result<String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .context("seraph.coordination requires a string action")?;
+    let result = match action {
+        "create" => {
+            let subject = arguments
+                .get("subject")
+                .and_then(Value::as_str)
+                .context("create requires a string subject")?;
+            if subject.len() > 512 {
+                bail!("subject exceeds 512 bytes");
+            }
+            let blocked_by = arguments
+                .get("blocked_by")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .context("blocked_by must be an array")?
+                        .iter()
+                        .map(|id| {
+                            id.as_i64()
+                                .filter(|id| *id > 0)
+                                .context("blocked_by IDs must be positive integers")
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if blocked_by.len() > 64 {
+                bail!("blocked_by exceeds 64 task IDs");
+            }
+            json!({ "created": board.create(subject, &blocked_by)? })
+        }
+        "list" => {
+            let ready_only = arguments
+                .get("ready_only")
+                .map(|value| value.as_bool().context("ready_only must be a boolean"))
+                .transpose()?
+                .unwrap_or(false);
+            let after_id = arguments
+                .get("after_id")
+                .map(|value| {
+                    value
+                        .as_i64()
+                        .filter(|id| *id >= 0)
+                        .context("after_id must be a non-negative integer")
+                })
+                .transpose()?
+                .unwrap_or(0);
+            let limit = arguments
+                .get("limit")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|limit| (1..=200).contains(limit))
+                        .context("limit must be an integer from 1 to 200")
+                })
+                .transpose()?
+                .unwrap_or(50) as usize;
+            return board.list_json(ready_only, after_id, limit);
+        }
+        "claim" => json!({
+            "claimed": board.claim(task_id(arguments)?, caller)?,
+            "owner": caller,
+        }),
+        "complete" => match board.complete(task_id(arguments)?, caller)? {
+            Some((unblocked, truncated)) => json!({
+                "completed": true,
+                "unblocked": unblocked,
+                "unblocked_truncated": truncated,
+            }),
+            None => json!({
+                "completed": false,
+                "unblocked": [],
+                "unblocked_truncated": false,
+            }),
+        },
+        "fail" => json!({
+            "failed": board.fail(task_id(arguments)?, caller)?,
+        }),
+        _ => bail!("unknown coordination action {action:?}"),
+    };
+    Ok(serde_json::to_string(&result)?)
+}
+
+fn task_id(arguments: &Value) -> Result<i64> {
+    arguments
+        .get("id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+        .context("action requires a positive integer id")
+}
+
+fn bounded_error(error: &anyhow::Error) -> String {
+    let mut text = format!("{error:#}");
+    if text.len() > MAX_TOOL_RESULT_BYTES {
+        let mut end = MAX_TOOL_RESULT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
 }
 
 fn signed_in(account: &Value) -> bool {

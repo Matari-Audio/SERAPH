@@ -16,6 +16,7 @@ pub enum CodexEvent {
 
 pub struct ToolCall {
     id: Value,
+    pub thread_id: String,
     pub namespace: Option<String>,
     pub tool: String,
     pub arguments: Value,
@@ -149,6 +150,33 @@ impl Codex {
                         "required": ["code"],
                         "additionalProperties": false
                     }
+                }, {
+                    "type": "function",
+                    "name": "coordination",
+                    "description": "Create, inspect, claim, and finish durable shared tasks",
+                    "deferLoading": true,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["create", "list", "claim", "complete", "fail"]
+                            },
+                            "id": { "type": "integer", "minimum": 1 },
+                            "subject": { "type": "string", "maxLength": 512 },
+                            "blocked_by": {
+                                "type": "array",
+                                "items": { "type": "integer", "minimum": 1 },
+                                "uniqueItems": true,
+                                "maxItems": 64
+                            },
+                            "ready_only": { "type": "boolean" },
+                            "after_id": { "type": "integer", "minimum": 0 },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+                        },
+                        "required": ["action"],
+                        "additionalProperties": false
+                    }
                 }]
             }]
         });
@@ -267,6 +295,7 @@ impl Codex {
         let params = message.get("params").context("tool call omitted params")?;
         Ok(ToolCall {
             id,
+            thread_id: required_string(params, "threadId")?.to_owned(),
             namespace: params
                 .get("namespace")
                 .and_then(Value::as_str)
