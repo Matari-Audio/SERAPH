@@ -35,7 +35,7 @@ const MAX_AGENT_RESULT_BYTES: usize = 2 * 1024;
 const MAX_AGENT_MESSAGE_BYTES: usize = 16 * 1024;
 
 enum LoginOutcome {
-    Complete,
+    Complete { backend_ready: bool },
     Cancelled,
     Quit,
 }
@@ -529,6 +529,7 @@ async fn run_controller(
         }
     };
     let mut account = codex.account(false).await?;
+    send_login_providers(&events, &mut codex).await?;
     send_account(&events, &account).await?;
     let models = codex.models().await?;
     let (mut model, efforts, selected_effort) = select_model(&models)?;
@@ -560,9 +561,32 @@ async fn run_controller(
     let result: Result<()> = async {
         while let Some(command) = commands.recv().await {
             match command {
-                UiCommand::Login(method) => {
-                    match login(&mut codex, &events, &mut commands, &method).await? {
-                        LoginOutcome::Complete => {
+                UiCommand::Login {
+                    provider,
+                    auth_type,
+                } => {
+                    match login(
+                        &mut codex,
+                        &events,
+                        &mut commands,
+                        &provider,
+                        &auth_type,
+                    )
+                    .await?
+                    {
+                        LoginOutcome::Complete { backend_ready } => {
+                            send_login_providers(&events, &mut codex).await?;
+                            if !backend_ready {
+                                events
+                                    .send(UiEvent::LoginFinished {
+                                        success: true,
+                                        error: Some(format!(
+                                            "Signed in to {provider}. Model backend selection is not enabled yet."
+                                        )),
+                                    })
+                                    .await?;
+                                continue;
+                            }
                             events.send(UiEvent::Ready(false)).await?;
                             account = codex.account(false).await?;
                             send_account(&events, &account).await?;
@@ -630,6 +654,26 @@ async fn run_controller(
     codex_shutdown
 }
 
+async fn send_login_providers(events: &mpsc::Sender<UiEvent>, codex: &mut Codex) -> Result<()> {
+    events
+        .send(UiEvent::LoginProviders(
+            codex
+                .login_providers()
+                .await?
+                .into_iter()
+                .map(|provider| {
+                    let status = if provider.signed_in { "  ✓" } else { "" };
+                    (
+                        format!("{}\t{}", provider.provider, provider.auth_type),
+                        format!("{}{status}", provider.label),
+                    )
+                })
+                .collect(),
+        ))
+        .await?;
+    Ok(())
+}
+
 fn watch_tasks(project: PathBuf, events: mpsc::Sender<UiEvent>) {
     thread::spawn(move || {
         let database = project.join(".seraph/tasks.sqlite3");
@@ -677,9 +721,10 @@ async fn login(
     codex: &mut Codex,
     events: &mpsc::Sender<UiEvent>,
     commands: &mut mpsc::Receiver<UiCommand>,
-    method: &str,
+    provider: &str,
+    auth_type: &str,
 ) -> Result<LoginOutcome> {
-    let login_id = codex.start_chatgpt_login(method).await?;
+    let login_id = codex.start_login(provider, auth_type).await?;
     events
         .send(UiEvent::LoginPending {
             login_id: login_id.clone(),
@@ -687,7 +732,7 @@ async fn login(
         .await?;
 
     enum Outcome {
-        Complete,
+        Complete(bool),
         Failed(anyhow::Error),
         Cancel,
         Quit,
@@ -741,7 +786,9 @@ async fn login(
                     Ok(LoginEvent::Progress(message)) => {
                         events.send(UiEvent::LoginProgress(message)).await?;
                     }
-                    Ok(LoginEvent::Complete) => break Outcome::Complete,
+                    Ok(LoginEvent::Complete { backend_ready }) => {
+                        break Outcome::Complete(backend_ready);
+                    }
                     Err(error) => break Outcome::Failed(error),
                 },
                 Next::Command(command) => match command {
@@ -759,7 +806,7 @@ async fn login(
     };
 
     match outcome {
-        Outcome::Complete => Ok(LoginOutcome::Complete),
+        Outcome::Complete(backend_ready) => Ok(LoginOutcome::Complete { backend_ready }),
         Outcome::Failed(error) => {
             events
                 .send(UiEvent::LoginFinished {

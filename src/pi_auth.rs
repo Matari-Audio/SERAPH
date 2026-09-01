@@ -20,6 +20,13 @@ pub struct LoginOption {
     pub label: String,
 }
 
+pub struct LoginProvider {
+    pub provider: String,
+    pub auth_type: String,
+    pub label: String,
+    pub signed_in: bool,
+}
+
 pub enum PiLoginEvent {
     AuthUrl {
         url: String,
@@ -36,7 +43,10 @@ pub enum PiLoginEvent {
         options: Vec<LoginOption>,
     },
     Progress(String),
-    Complete(ChatgptTokens),
+    Complete {
+        provider: String,
+        tokens: Option<ChatgptTokens>,
+    },
 }
 
 pub struct PiAuth {
@@ -98,8 +108,32 @@ impl PiAuth {
         parse_tokens(&value)
     }
 
-    pub async fn start_login(&mut self, method: &str) -> Result<u64> {
-        self.send("login", json!({ "loginMethod": method })).await
+    pub async fn login_providers(&mut self) -> Result<Vec<LoginProvider>> {
+        self.request("providers", json!({}))
+            .await?
+            .as_array()
+            .context("Pi auth providers response was not an array")?
+            .iter()
+            .map(|provider| {
+                Ok(LoginProvider {
+                    provider: required_string(provider, "provider")?.to_owned(),
+                    auth_type: required_string(provider, "authType")?.to_owned(),
+                    label: required_string(provider, "label")?.to_owned(),
+                    signed_in: provider
+                        .get("signedIn")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn start_login(&mut self, provider: &str, auth_type: &str) -> Result<u64> {
+        self.send(
+            "login",
+            json!({ "provider": provider, "authType": auth_type }),
+        )
+        .await
     }
 
     pub async fn next_login_event(&mut self, id: u64) -> Result<PiLoginEvent> {
@@ -110,9 +144,17 @@ impl PiAuth {
             };
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 let value = response_result(message)?;
-                return Ok(PiLoginEvent::Complete(
-                    parse_tokens(&value)?.context("Pi login returned no credential")?,
-                ));
+                return Ok(PiLoginEvent::Complete {
+                    provider: required_string(&value, "provider")
+                        .unwrap_or("openai-codex")
+                        .to_owned(),
+                    tokens: value
+                        .get("accessToken")
+                        .is_some()
+                        .then(|| parse_tokens(&value))
+                        .transpose()?
+                        .flatten(),
+                });
             }
             match message.get("event").and_then(Value::as_str) {
                 Some("auth") => match message.get("type").and_then(Value::as_str) {

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-const provider = "openai-codex";
+const codexProvider = "openai-codex";
 const authPath = process.env.SERAPH_AUTH_PATH || join(homedir(), ".seraph", "auth.json");
 const runtime = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
 let login;
@@ -25,7 +25,7 @@ function tokenClaims(accessToken) {
 }
 
 async function tokens(id, force = false) {
-  const resolved = await runtime.getAuth(provider, { minOAuthValidityMs: force ? 3_500_000 : 30_000 });
+  const resolved = await runtime.getAuth(codexProvider, { minOAuthValidityMs: force ? 3_500_000 : 30_000 });
   const accessToken = resolved?.auth.apiKey;
   if (!accessToken) return send({ id, result: null });
   const claims = tokenClaims(accessToken);
@@ -40,15 +40,40 @@ async function tokens(id, force = false) {
   });
 }
 
-function startLogin(id, method) {
+function providers(id) {
+  const result = runtime.getProviders().flatMap((provider) => {
+    const status = runtime.getProviderAuthStatus(provider.id);
+    return [
+      provider.auth.oauth && {
+        provider: provider.id,
+        authType: "oauth",
+        label: `${provider.name} — ${provider.auth.oauth.loginLabel || provider.auth.oauth.name}`,
+        signedIn: status.configured && runtime.isUsingOAuth(provider.id),
+      },
+      provider.auth.apiKey?.login && {
+        provider: provider.id,
+        authType: "api_key",
+        label: `${provider.name} — ${provider.auth.apiKey.name}`,
+        signedIn: status.configured && !runtime.isUsingOAuth(provider.id),
+      },
+    ].filter(Boolean);
+  }).sort((a, b) => a.authType === b.authType
+    ? a.label.localeCompare(b.label)
+    : a.authType === "oauth" ? -1 : 1);
+  send({ id, result });
+}
+
+function startLogin(id, provider, authType) {
   if (login) return send({ id, error: "Login already in progress" });
+  if (!runtime.getProvider(provider)?.auth?.[authType]) {
+    return send({ id, error: `Unsupported login: ${provider}/${authType}` });
+  }
   const controller = new AbortController();
   login = controller;
-  runtime.login(provider, "oauth", {
+  runtime.login(provider, authType, {
     signal: controller.signal,
     notify: (event) => send({ event: "auth", ...event }),
     prompt: (prompt) => {
-      if (prompt.type === "select" && method) return Promise.resolve(method);
       send({
         event: "prompt",
         prompt: {
@@ -83,7 +108,7 @@ function startLogin(id, method) {
       });
     },
   }).then(
-    () => tokens(id),
+    () => provider === codexProvider ? tokens(id) : send({ id, result: { provider } }),
     (error) => send({ id, error: error instanceof Error ? error.message : String(error) }),
   ).finally(() => {
     login = undefined;
@@ -96,7 +121,8 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
   try {
     request = JSON.parse(line);
     if (request.method === "tokens") await tokens(request.id, request.force === true);
-    else if (request.method === "login") startLogin(request.id, request.loginMethod);
+    else if (request.method === "providers") providers(request.id);
+    else if (request.method === "login") startLogin(request.id, request.provider, request.authType);
     else if (request.method === "prompt") {
       if (!pendingPrompt) throw new Error("No login prompt is waiting");
       pendingPrompt(String(request.value || ""));
@@ -106,7 +132,7 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
       login?.abort();
       send({ id: request.id, result: null });
     } else if (request.method === "logout") {
-      await runtime.logout(provider);
+      await runtime.logout(request.provider || codexProvider);
       send({ id: request.id, result: null });
     } else send({ id: request.id, error: `Unknown method: ${request.method}` });
   } catch (error) {
