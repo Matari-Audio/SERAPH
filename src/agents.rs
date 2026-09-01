@@ -3,16 +3,17 @@ use std::{
     env,
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
 use processkit::ProcessGroup;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
     sync::{Mutex, Notify, mpsc, oneshot},
     task::{AbortHandle, JoinHandle},
@@ -24,7 +25,41 @@ use crate::tui::{AgentSummary, UiEvent};
 const MAX_RESULT_BYTES: usize = 2_048;
 const MAX_WAIT_IDS: usize = 8;
 const MAX_RUNNING_AGENTS: usize = 8;
-const AGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChildCommand {
+    Start { prompt: String },
+    FollowUp { key: String, prompt: String },
+    Interrupt,
+    Shutdown,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChildEvent {
+    Ready,
+    Queued {
+        key: String,
+        submission_id: String,
+        starts_immediately: bool,
+    },
+    Running {
+        key: Option<String>,
+        result: Option<String>,
+    },
+    Idle {
+        result: String,
+    },
+    Interrupted {
+        accepted: bool,
+    },
+    Failed {
+        error: String,
+    },
+    Stopped,
+}
 
 pub struct AgentManager {
     executable: PathBuf,
@@ -46,14 +81,23 @@ struct AgentRecord {
     status: AgentStatus,
     prompt: String,
     result: Option<String>,
+    control: Arc<Mutex<tokio::process::ChildStdin>>,
+    follow_ups: BTreeMap<String, FollowUp>,
+    interrupt_pending: bool,
+    interrupt_result: Option<bool>,
     task: Option<JoinHandle<()>>,
     stop: Option<oneshot::Sender<()>>,
 }
 
 enum AgentStatus {
     Running,
-    Completed,
+    Idle,
     Failed,
+}
+
+struct FollowUp {
+    prompt: String,
+    result: Option<Value>,
 }
 
 impl AgentManager {
@@ -94,12 +138,7 @@ impl AgentManager {
             bail!("agent prompt must contain 1 to 16384 bytes");
         }
         let mut records = self.inner.records.lock().await;
-        if records
-            .values()
-            .filter(|record| !record.is_finished())
-            .count()
-            >= MAX_RUNNING_AGENTS
-        {
+        if records.values().filter(|record| record.is_alive()).count() >= MAX_RUNNING_AGENTS {
             bail!("at most {MAX_RUNNING_AGENTS} agents may run concurrently");
         }
         let id = self
@@ -119,18 +158,12 @@ impl AgentManager {
             .kill_on_drop(true);
         let group = ProcessGroup::new().context("create SERAPH agent process group")?;
         let mut child = group.spawn(command).context("spawn SERAPH agent")?;
-        let mut control = child
-            .stdin
-            .take()
-            .context("SERAPH agent stdin unavailable")?;
-        control
-            .write_all(prompt.as_bytes())
-            .await
-            .context("write SERAPH agent prompt")?;
-        control
-            .shutdown()
-            .await
-            .context("close SERAPH agent prompt")?;
+        let control = Arc::new(Mutex::new(
+            child
+                .stdin
+                .take()
+                .context("SERAPH agent stdin unavailable")?,
+        ));
         let stdout = child
             .stdout
             .take()
@@ -148,43 +181,59 @@ impl AgentManager {
                 status: AgentStatus::Running,
                 prompt: prompt.lines().next().unwrap_or(prompt).trim().to_owned(),
                 result: None,
+                control: Arc::clone(&control),
+                follow_ups: BTreeMap::new(),
+                interrupt_pending: false,
+                interrupt_result: None,
                 task: None,
                 stop: Some(stop),
             },
         );
 
         let inner = Arc::clone(&self.inner);
+        let supervisor_control = Arc::clone(&control);
         let task = tokio::spawn(async move {
-            let stdout = tokio::spawn(read_bounded(stdout));
+            let mut events = tokio::spawn(read_child_events(stdout, Arc::clone(&inner), id));
             let stderr = tokio::spawn(read_bounded(stderr));
+            let mut completed_events = None;
             let outcome = tokio::select! {
-                status = child.wait() => status.context("wait for SERAPH agent").map(Some),
-                _ = stop_rx => terminate_child(&group, &mut child).await.map(|_| None),
-                _ = tokio::time::sleep(AGENT_TIMEOUT) => {
-                    terminate_child(&group, &mut child).await.map(|_| None)
+                status = child.wait() => status.context("wait for SERAPH agent"),
+                result = &mut events => {
+                    let graceful = matches!(result, Ok(Ok(true)));
+                    completed_events = Some(result);
+                    if graceful {
+                        child.wait().await.context("wait for stopped SERAPH agent")
+                    } else {
+                        terminate_child(&group, &mut child).await
+                    }
+                },
+                _ = stop_rx => {
+                    let shutdown = write_child_command(&supervisor_control, &ChildCommand::Shutdown).await;
+                    match shutdown {
+                        Ok(()) => match tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await {
+                            Ok(status) => status.context("wait for SERAPH agent shutdown"),
+                            Err(_) => terminate_child(&group, &mut child).await,
+                        },
+                        Err(_) => terminate_child(&group, &mut child).await,
+                    }
                 },
             };
-            let stdout = stdout.await.unwrap_or_default();
             let stderr = stderr.await.unwrap_or_default();
-            let (status, result) = match outcome {
-                Ok(Some(exit)) => {
-                    let status = if exit.success() {
-                        AgentStatus::Completed
-                    } else {
-                        AgentStatus::Failed
-                    };
-                    (status, bounded_result(&stdout, &stderr))
-                }
-                Ok(None) => (AgentStatus::Failed, "agent cancelled".into()),
-                Err(error) => (
-                    AgentStatus::Failed,
-                    bounded_text(error.to_string().as_bytes()),
-                ),
+            let event_result = match completed_events {
+                Some(result) => result,
+                None => events.await,
             };
             let mut records = inner.records.lock().await;
             if let Some(record) = records.get_mut(&id) {
-                record.status = status;
-                record.result = Some(result);
+                let graceful = matches!(event_result, Ok(Ok(true)));
+                if !graceful {
+                    record.status = AgentStatus::Failed;
+                    record.result = Some(match outcome {
+                        Ok(exit) if !exit.success() && !stderr.is_empty() => bounded_text(&stderr),
+                        Ok(exit) => format!("agent exited with {exit}"),
+                        Err(error) => bounded_text(error.to_string().as_bytes()),
+                    });
+                }
             }
             let summaries = records.values().map(AgentRecord::summary).collect();
             drop(records);
@@ -201,6 +250,26 @@ impl AgentManager {
             record.task = Some(task);
         }
         drop(records);
+        if let Err(error) = write_child_command(
+            &control,
+            &ChildCommand::Start {
+                prompt: prompt.into(),
+            },
+        )
+        .await
+        {
+            if let Some(stop) = self
+                .inner
+                .records
+                .lock()
+                .await
+                .get_mut(&id)
+                .and_then(|record| record.stop.take())
+            {
+                let _ = stop.send(());
+            }
+            return Err(error);
+        }
         self.publish().await;
 
         Ok(json!({ "id": id, "address": format!("agent:{id}"), "status": "running" }))
@@ -253,18 +322,116 @@ impl AgentManager {
         }
     }
 
-    pub async fn interrupt(&self, id: u64) -> Result<bool> {
-        let stop = {
+    pub async fn follow_up(&self, id: u64, prompt: &str, key: &str) -> Result<Value> {
+        if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
+            bail!("follow-up prompt must contain 1 to 16384 bytes");
+        }
+        if key.trim().is_empty() || key.len() > 128 {
+            bail!("follow-up key must contain 1 to 128 bytes");
+        }
+        let (control, write) = {
             let mut records = self.inner.records.lock().await;
             let record = records
                 .get_mut(&id)
-                .with_context(|| format!("agent {id} not found"))?;
-            if record.is_finished() {
+                .with_context(|| format!("agent {id} is not owned by this live session"))?;
+            if matches!(record.status, AgentStatus::Failed) {
+                bail!("agent {id} is not running");
+            }
+            match record.follow_ups.get(key) {
+                Some(existing) if existing.prompt != prompt => {
+                    bail!("follow-up key already identifies a different prompt")
+                }
+                Some(existing) if existing.result.is_some() => {
+                    return existing.result.clone().context("follow-up result missing");
+                }
+                Some(_) => (Arc::clone(&record.control), false),
+                None => {
+                    record.follow_ups.insert(
+                        key.to_owned(),
+                        FollowUp {
+                            prompt: prompt.to_owned(),
+                            result: None,
+                        },
+                    );
+                    (Arc::clone(&record.control), true)
+                }
+            }
+        };
+        if write
+            && let Err(error) = write_child_command(
+                &control,
+                &ChildCommand::FollowUp {
+                    key: key.into(),
+                    prompt: prompt.into(),
+                },
+            )
+            .await
+        {
+            if let Some(record) = self.inner.records.lock().await.get_mut(&id) {
+                record.follow_ups.remove(key);
+            }
+            return Err(error);
+        }
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let records = self.inner.records.lock().await;
+            let record = records
+                .get(&id)
+                .with_context(|| format!("agent {id} disappeared"))?;
+            if let Some(result) = record
+                .follow_ups
+                .get(key)
+                .and_then(|follow_up| follow_up.result.clone())
+            {
+                return Ok(result);
+            }
+            if matches!(record.status, AgentStatus::Failed) {
+                bail!("agent {id} failed before acknowledging follow-up")
+            }
+            drop(records);
+            changed.await;
+        }
+    }
+
+    pub async fn interrupt(&self, id: u64) -> Result<bool> {
+        let (control, write) = {
+            let mut records = self.inner.records.lock().await;
+            let record = records
+                .get_mut(&id)
+                .with_context(|| format!("agent {id} is not owned by this live session"))?;
+            if !matches!(record.status, AgentStatus::Running) {
                 return Ok(false);
             }
-            record.stop.take()
+            record.interrupt_result = None;
+            let write = !record.interrupt_pending;
+            record.interrupt_pending = true;
+            (Arc::clone(&record.control), write)
         };
-        Ok(stop.is_some_and(|stop| stop.send(()).is_ok()))
+        if write && let Err(error) = write_child_command(&control, &ChildCommand::Interrupt).await {
+            if let Some(record) = self.inner.records.lock().await.get_mut(&id) {
+                record.interrupt_pending = false;
+            }
+            return Err(error);
+        }
+        loop {
+            let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let records = self.inner.records.lock().await;
+            let record = records
+                .get(&id)
+                .with_context(|| format!("agent {id} disappeared"))?;
+            if let Some(accepted) = record.interrupt_result {
+                return Ok(accepted);
+            }
+            if matches!(record.status, AgentStatus::Failed) {
+                bail!("agent {id} failed before acknowledging interrupt")
+            }
+            drop(records);
+            changed.await;
+        }
     }
 
     pub fn send(&self, recipient: &str, message: &str, key: &str) -> Result<Value> {
@@ -338,7 +505,11 @@ fn validate_address(address: &str) -> Result<()> {
 
 impl AgentRecord {
     fn is_finished(&self) -> bool {
-        !matches!(self.status, AgentStatus::Running)
+        matches!(self.status, AgentStatus::Idle | AgentStatus::Failed)
+    }
+
+    fn is_alive(&self) -> bool {
+        !matches!(self.status, AgentStatus::Failed)
     }
 
     fn json(&self) -> Value {
@@ -380,20 +551,103 @@ impl AgentStatus {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
-            Self::Completed => "completed",
+            Self::Idle => "idle",
             Self::Failed => "failed",
         }
     }
 }
 
-fn bounded_result(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut bytes = Vec::with_capacity(MAX_RESULT_BYTES);
-    append_bounded(&mut bytes, stdout);
-    if !bytes.is_empty() && !stderr.is_empty() {
-        append_bounded(&mut bytes, b"\n");
+async fn write_child_command(
+    control: &Mutex<tokio::process::ChildStdin>,
+    command: &ChildCommand,
+) -> Result<()> {
+    let mut line = serde_json::to_vec(command)?;
+    line.push(b'\n');
+    let mut control = control.lock().await;
+    control
+        .write_all(&line)
+        .await
+        .context("write SERAPH agent command")?;
+    control.flush().await.context("flush SERAPH agent command")
+}
+
+async fn read_child_events(
+    stdout: impl AsyncRead + Unpin,
+    inner: Arc<Inner>,
+    id: u64,
+) -> Result<bool> {
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines.next_line().await.context("read SERAPH agent event")? {
+        let event: ChildEvent =
+            serde_json::from_str(&line).context("decode SERAPH agent event JSON")?;
+        let mut records = inner.records.lock().await;
+        let Some(record) = records.get_mut(&id) else {
+            return Ok(false);
+        };
+        match event {
+            ChildEvent::Ready => {}
+            ChildEvent::Queued {
+                key,
+                submission_id,
+                starts_immediately,
+            } => {
+                let follow_up = record.follow_ups.get_mut(&key).with_context(|| {
+                    format!("agent {id} acknowledged unknown follow-up {key:?}")
+                })?;
+                follow_up.result = Some(json!({
+                    "id": id,
+                    "key": key,
+                    "queued_submission_id": submission_id,
+                    "starts_immediately": starts_immediately,
+                }));
+                if starts_immediately {
+                    record.status = AgentStatus::Running;
+                    record.prompt = follow_up
+                        .prompt
+                        .lines()
+                        .next()
+                        .unwrap_or(&follow_up.prompt)
+                        .trim()
+                        .to_owned();
+                }
+            }
+            ChildEvent::Running { key, result } => {
+                record.status = AgentStatus::Running;
+                if result.is_some() {
+                    record.result = result;
+                }
+                if let Some(follow_up) = key.and_then(|key| record.follow_ups.get(&key)) {
+                    record.prompt = follow_up
+                        .prompt
+                        .lines()
+                        .next()
+                        .unwrap_or(&follow_up.prompt)
+                        .trim()
+                        .to_owned();
+                }
+            }
+            ChildEvent::Idle { result } => {
+                record.status = AgentStatus::Idle;
+                record.result = Some(result);
+            }
+            ChildEvent::Interrupted { accepted } => {
+                record.interrupt_pending = false;
+                record.interrupt_result = Some(accepted);
+            }
+            ChildEvent::Failed { error } => {
+                record.status = AgentStatus::Failed;
+                record.result = Some(error);
+            }
+            ChildEvent::Stopped => return Ok(true),
+        }
+        let summaries = records.values().map(AgentRecord::summary).collect();
+        drop(records);
+        inner.changed.notify_waiters();
+        if let Some(ui) = &inner.ui {
+            let _ = ui.send(UiEvent::AgentsChanged(summaries)).await;
+        }
     }
-    append_bounded(&mut bytes, stderr);
-    bounded_text(&bytes)
+    Ok(false)
 }
 
 fn append_bounded(output: &mut Vec<u8>, input: &[u8]) {
@@ -426,8 +680,7 @@ async fn read_bounded(mut input: impl AsyncRead + Unpin) -> Vec<u8> {
     output
 }
 
-async fn terminate_child(group: &ProcessGroup, child: &mut Child) -> Result<()> {
+async fn terminate_child(group: &ProcessGroup, child: &mut Child) -> Result<ExitStatus> {
     group.kill_all().context("kill SERAPH agent process tree")?;
-    child.wait().await.context("reap SERAPH agent")?;
-    Ok(())
+    child.wait().await.context("reap SERAPH agent")
 }

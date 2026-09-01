@@ -247,7 +247,7 @@ impl Codex {
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["spawn", "list", "wait", "interrupt", "send", "receive"]
+                                "enum": ["spawn", "list", "wait", "interrupt", "follow_up", "send", "receive"]
                             },
                             "id": { "type": "integer", "minimum": 1 },
                             "prompt": { "type": "string", "maxLength": 16384 },
@@ -300,6 +300,50 @@ impl Codex {
             .and_then(Value::as_str)
             .context("turn/start response omitted turn.id")?
             .to_owned())
+    }
+
+    pub async fn queue_turn(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        client_user_message_id: &str,
+    ) -> Result<String> {
+        let response = self
+            .request(
+                "thread/queue/add",
+                json!({
+                    "threadId": thread_id,
+                    "clientUserMessageId": client_user_message_id,
+                    "input": [{ "type": "text", "text": prompt }],
+                }),
+            )
+            .await?;
+        response
+            .pointer("/queuedSubmission/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("thread/queue/add response omitted queuedSubmission.id")
+    }
+
+    pub async fn start_queued_turn(
+        &mut self,
+        thread_id: &str,
+        submission_id: &str,
+    ) -> Result<String> {
+        let response = self
+            .request(
+                "thread/queue/start",
+                json!({
+                    "threadId": thread_id,
+                    "queuedSubmissionId": submission_id,
+                }),
+            )
+            .await?;
+        response
+            .pointer("/turn/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("thread/queue/start response omitted turn.id")
     }
 
     pub async fn next_turn_event(&mut self, thread_id: &str, turn_id: &str) -> Result<CodexEvent> {
@@ -412,7 +456,9 @@ impl Codex {
                 break message;
             }
             let message = self.read().await?;
-            if is_server_request(&message) {
+            if is_server_request(&message)
+                && message.get("method").and_then(Value::as_str) != Some("item/tool/call")
+            {
                 self.handle_server_request(&message).await?;
                 continue;
             }

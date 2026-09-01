@@ -1305,7 +1305,7 @@ fn render_agents(frame: &mut Frame, app: &App) {
 fn status_icon(status: &str, tick: usize) -> &'static str {
     match status {
         "running" => grok_ui::BRAILLE_SPINNER_FRAMES[tick % grok_ui::BRAILLE_SPINNER_FRAMES.len()],
-        "completed" => "●",
+        "idle" => "○",
         "failed" => "●",
         _ => "○",
     }
@@ -1314,7 +1314,7 @@ fn status_icon(status: &str, tick: usize) -> &'static str {
 fn status_color(status: &str) -> Color {
     match status {
         "running" => MAGENTA,
-        "completed" => GREEN,
+        "idle" => GREEN,
         "failed" => RED,
         _ => YELLOW,
     }
