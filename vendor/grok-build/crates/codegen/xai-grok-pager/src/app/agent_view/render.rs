@@ -3513,7 +3513,7 @@ impl AgentView {
                     .render(layout.shortcuts, buf);
             }
             ShortcutsBarContent::Pane(hints) => {
-                let help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| {
+                let mut help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| {
                     let mut hint = def.hint();
                     if in_dashboard_overlay
                         && def.default_key == key!('x', CONTROL)
@@ -3521,11 +3521,25 @@ impl AgentView {
                     {
                         hint.keys = vec![*alt];
                     }
+                    hint.custom_display = Some("?");
                     hint
                 });
+                let model_name = self
+                    .session
+                    .models
+                    .current_model_name()
+                    .unwrap_or_else(|| "model".to_string());
+                let footer_status = self
+                    .session
+                    .models
+                    .reasoning_effort
+                    .map_or(model_name.clone(), |effort| {
+                        format!("{model_name}  EFFORT:<{effort}>")
+                    });
                 ShortcutsBar::new(&hints)
                     .compact(5, help_hint)
                     .with_pending(pending_hint)
+                    .with_right_text(Some(&footer_status))
                     .render(layout.shortcuts, buf);
             }
         }

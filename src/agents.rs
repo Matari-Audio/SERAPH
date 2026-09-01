@@ -40,6 +40,9 @@ pub enum ChildCommand {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChildEvent {
     Ready,
+    MessageDelta {
+        text: String,
+    },
     Queued {
         key: String,
         submission_id: String,
@@ -586,6 +589,16 @@ async fn read_child_events(
         };
         match event {
             ChildEvent::Ready => {}
+            ChildEvent::MessageDelta { text } => {
+                let result = record.result.get_or_insert_with(String::new);
+                let mut end = text
+                    .len()
+                    .min(MAX_RESULT_BYTES.saturating_sub(result.len()));
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                result.push_str(&text[..end]);
+            }
             ChildEvent::Queued {
                 key,
                 submission_id,

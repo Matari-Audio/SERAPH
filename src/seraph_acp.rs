@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, future::Future, pin::Pin};
+use std::{collections::HashMap, env, future::Future, pin::Pin, sync::Arc};
 
 use agent_client_protocol::{self as acp, Client as _};
 use anyhow::{Context, Result};
@@ -7,10 +7,9 @@ use tokio_util::sync::CancellationToken;
 use xai_acp_lib::{AcpClientTx, AcpGatewaySender};
 
 use crate::{
-    ToolHost,
-    agents::AgentManager,
-    codex::{Codex, CodexEvent, LoginEvent, ToolResult},
-    execute_tool, select_model, signed_in,
+    pi_auth::{PiAuth, PiLoginEvent},
+    pi_rpc::{PiEvent, PiRpc},
+    skills,
 };
 
 type SpawnFuture =
@@ -32,34 +31,49 @@ pub fn spawn(cancel: CancellationToken) -> SpawnFuture {
 
 struct SeraphAgent {
     client: AcpGatewaySender<acp::AgentSide>,
-    codex: Mutex<Codex>,
-    tools: Mutex<ToolHost>,
-    sessions: Mutex<HashMap<acp::SessionId, String>>,
+    auth: Mutex<PiAuth>,
+    sessions: Mutex<HashMap<acp::SessionId, SeraphSession>>,
     cancellations: Mutex<HashMap<acp::SessionId, CancellationToken>>,
-    model: String,
+    default_model: String,
+    models: Vec<acp::ModelInfo>,
     authenticated: Mutex<bool>,
+}
+
+#[derive(Clone)]
+struct SeraphSession {
+    backend: Arc<Mutex<PiRpc>>,
+    model: String,
+    effort: Option<String>,
+    skills: Arc<HashMap<String, xai_grok_tools::implementations::skills::types::SkillInfo>>,
 }
 
 impl SeraphAgent {
     async fn new() -> Result<Self> {
-        let mut codex = Codex::spawn().await?;
-        let authenticated = signed_in(&codex.account(false).await?);
-        let (model, _, _) = select_model(&codex.models().await?)?;
-        let cwd = env::current_dir().context("read current directory")?;
+        let mut auth = PiAuth::spawn().await?;
+        let authenticated = auth.tokens().await?.is_some();
+        let catalog = auth.models("openai-codex").await?;
+        let default_model = catalog
+            .as_array()
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| {
+                        model.get("id").and_then(serde_json::Value::as_str) == Some("gpt-5.6-sol")
+                    })
+                    .or_else(|| models.first())
+            })
+            .and_then(|model| model.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .context("Pi returned no OpenAI Codex models")?
+            .to_owned();
+        let models = acp_model_catalog(&catalog)?;
         Ok(Self {
             client: AcpGatewaySender::new(dummy_client()),
-            codex: Mutex::new(codex),
-            tools: Mutex::new(ToolHost {
-                kernel: None,
-                task_board: None,
-                edits: Default::default(),
-                next_edit_handle: 1,
-                project: cwd.clone(),
-                agents: AgentManager::new(cwd, None)?,
-            }),
+            auth: Mutex::new(auth),
             sessions: Mutex::new(HashMap::new()),
             cancellations: Mutex::new(HashMap::new()),
-            model,
+            default_model,
+            models,
             authenticated: Mutex::new(authenticated),
         })
     }
@@ -71,6 +85,24 @@ impl SeraphAgent {
     ) -> acp::Result<()> {
         self.client
             .session_notification(acp::SessionNotification::new(session_id, update))
+            .await
+    }
+
+    async fn notify_ext(
+        &self,
+        session_id: &acp::SessionId,
+        update: serde_json::Value,
+    ) -> acp::Result<()> {
+        let params = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": session_id.0,
+            "update": update,
+        }))
+        .map_err(acp_error)?;
+        self.client
+            .ext_notification(acp::ExtNotification::new(
+                "x.ai/session_notification",
+                params.into(),
+            ))
             .await
     }
 }
@@ -95,6 +127,49 @@ fn prompt_text(blocks: &[acp::ContentBlock]) -> String {
         .join("\n")
 }
 
+fn acp_model_catalog(catalog: &serde_json::Value) -> Result<Vec<acp::ModelInfo>> {
+    catalog
+        .as_array()
+        .context("Pi models response was not an array")?
+        .iter()
+        .map(|model| {
+            let id = model
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .context("Codex model omitted id")?;
+            let name = model
+                .get("displayName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(id);
+            let mut efforts = vec!["minimal", "low", "medium", "high", "xhigh"];
+            if model.pointer("/thinkingLevelMap/max").is_some() {
+                efforts.push("max");
+            }
+            let efforts: Vec<serde_json::Value> = efforts.into_iter().map(Into::into).collect();
+            let mut info = acp::ModelInfo::new(id.to_owned(), name.to_owned());
+            if model.get("reasoning").and_then(serde_json::Value::as_bool) == Some(true) {
+                let mut meta = acp::Meta::new();
+                meta.insert("supportsReasoningEffort".into(), true.into());
+                meta.insert("reasoningEfforts".into(), efforts.into());
+                meta.insert("reasoningEffort".into(), "medium".into());
+                info.meta = Some(meta);
+            }
+            Ok(info)
+        })
+        .collect()
+}
+
+fn model_default_effort(models: &[acp::ModelInfo], id: &str) -> Option<String> {
+    models
+        .iter()
+        .find(|model| model.model_id.0.as_ref() == id)?
+        .meta
+        .as_ref()?
+        .get("reasoningEffort")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for SeraphAgent {
     async fn initialize(&self, _: acp::InitializeRequest) -> acp::Result<acp::InitializeResponse> {
@@ -117,29 +192,25 @@ impl acp::Agent for SeraphAgent {
         &self,
         _: acp::AuthenticateRequest,
     ) -> acp::Result<acp::AuthenticateResponse> {
-        let mut codex = self.codex.lock().await;
-        let login_id = codex
+        let mut auth = self.auth.lock().await;
+        let login_id = auth
             .start_login("openai-codex", "oauth")
             .await
             .map_err(acp_error)?;
         loop {
-            match codex.next_login_event(&login_id).await.map_err(acp_error)? {
-                LoginEvent::AuthUrl { url, .. } => {
+            match auth.next_login_event(login_id).await.map_err(acp_error)? {
+                PiLoginEvent::AuthUrl { url, .. } => {
                     webbrowser::open(&url).map_err(acp_error)?;
                 }
-                LoginEvent::DeviceCode { url, .. } => {
+                PiLoginEvent::DeviceCode { url, .. } => {
                     webbrowser::open(&url).map_err(acp_error)?;
                 }
-                LoginEvent::Progress(_) => {}
-                LoginEvent::Complete {
-                    backend_ready: true,
-                } => break,
-                LoginEvent::Complete {
-                    backend_ready: false,
-                } => {
-                    return Err(acp_error("Pi login did not activate the Codex backend"));
+                PiLoginEvent::Progress(_) => {}
+                PiLoginEvent::Complete { provider, .. } if provider == "openai-codex" => break,
+                PiLoginEvent::Complete { .. } => {
+                    return Err(acp_error("Pi login selected the wrong provider"));
                 }
-                LoginEvent::Prompt {
+                PiLoginEvent::Prompt {
                     kind,
                     message,
                     options,
@@ -150,10 +221,15 @@ impl acp::Agent for SeraphAgent {
                         && message == "Select OpenAI Codex login method:"
                         && browser.is_some()
                     {
-                        codex
-                            .answer_login_prompt(&browser.unwrap().id)
+                        auth.answer_prompt(&browser.unwrap().id)
                             .await
                             .map_err(acp_error)?;
+                    } else if kind == "manual_code"
+                        && message.starts_with("Complete login in your browser")
+                    {
+                        // Pi races this fallback prompt against its localhost OAuth callback.
+                        // The browser callback owns completion; no terminal input is needed.
+                        continue;
                     } else {
                         return Err(acp_error(format!(
                             "Pi authentication needs unsupported input: {message}"
@@ -173,28 +249,67 @@ impl acp::Agent for SeraphAgent {
         if !*self.authenticated.lock().await {
             return Err(acp::Error::auth_required());
         }
-        let thread_id = self
-            .codex
-            .lock()
-            .await
-            .start_thread(&args.cwd, Some(&self.model))
+        let effort = model_default_effort(&self.models, &self.default_model);
+        let skills = Arc::new(skills::discover(&args.cwd));
+        let backend = PiRpc::spawn(&args.cwd, &self.default_model, effort.as_deref())
             .await
             .map_err(acp_error)?;
-        let session_id = acp::SessionId::new(thread_id.clone());
-        self.sessions
-            .lock()
-            .await
-            .insert(session_id.clone(), thread_id);
+        let mut sessions = self.sessions.lock().await;
+        let session_id = acp::SessionId::new(format!("pi-{}", sessions.len() + 1));
+        sessions.insert(
+            session_id.clone(),
+            SeraphSession {
+                backend: Arc::new(Mutex::new(backend)),
+                model: self.default_model.clone(),
+                effort,
+                skills,
+            },
+        );
         Ok(
             acp::NewSessionResponse::new(session_id).models(acp::SessionModelState::new(
-                self.model.clone(),
-                vec![acp::ModelInfo::new(self.model.clone(), self.model.clone())],
+                self.default_model.clone(),
+                self.models.clone(),
             )),
         )
     }
 
+    async fn set_session_model(
+        &self,
+        args: acp::SetSessionModelRequest,
+    ) -> acp::Result<acp::SetSessionModelResponse> {
+        let model = args.model_id.0.to_string();
+        if !self
+            .models
+            .iter()
+            .any(|candidate| candidate.model_id == args.model_id)
+        {
+            return Err(acp::Error::invalid_params());
+        }
+        let effort = args
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("reasoningEffort"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| model_default_effort(&self.models, &model));
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(&args.session_id)
+            .ok_or_else(acp::Error::invalid_params)?;
+        session
+            .backend
+            .lock()
+            .await
+            .set_model(&model, effort.as_deref())
+            .await
+            .map_err(acp_error)?;
+        session.model = model;
+        session.effort = effort;
+        Ok(acp::SetSessionModelResponse::new())
+    }
+
     async fn prompt(&self, args: acp::PromptRequest) -> acp::Result<acp::PromptResponse> {
-        let thread_id = self
+        let session = self
             .sessions
             .lock()
             .await
@@ -206,97 +321,168 @@ impl acp::Agent for SeraphAgent {
             .lock()
             .await
             .insert(args.session_id.clone(), cancel.clone());
-        let text = prompt_text(&args.prompt);
-        let turn_id = self
-            .codex
-            .lock()
-            .await
-            .start_turn(&thread_id, &text, None)
+        let text = skills::expand(&session.skills, prompt_text(&args.prompt))
             .await
             .map_err(acp_error)?;
+        session
+            .backend
+            .lock()
+            .await
+            .prompt(&text)
+            .await
+            .map_err(acp_error)?;
+        let mut child_streams: HashMap<String, (acp::SessionId, String)> = HashMap::new();
         let result = loop {
             let next = tokio::select! {
                 _ = cancel.cancelled() => None,
-                event = async {
-                    self.codex.lock().await.next_turn_event(&thread_id, &turn_id).await
-                } => Some(event.map_err(acp_error)?),
+                event = async { session.backend.lock().await.next_event().await } => Some(event.map_err(acp_error)?),
             };
             let Some(event) = next else {
-                self.codex
+                session
+                    .backend
                     .lock()
                     .await
-                    .interrupt_turn(&thread_id, &turn_id)
+                    .abort()
                     .await
                     .map_err(acp_error)?;
                 break acp::StopReason::Cancelled;
             };
             match event {
-                CodexEvent::AgentMessageDelta(delta) => {
+                PiEvent::TextDelta(delta) => {
                     self.notify(
                         args.session_id.clone(),
                         acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(delta.into())),
                     )
                     .await?;
                 }
-                CodexEvent::ToolCall(call) => {
-                    let tool_call_id = acp::ToolCallId::from(call.id_string());
-                    let title = call
-                        .namespace
-                        .as_ref()
-                        .map_or_else(|| call.tool.clone(), |ns| format!("{ns}.{}", call.tool));
+                PiEvent::ThinkingDelta(delta) => {
+                    self.notify(
+                        args.session_id.clone(),
+                        acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(delta.into())),
+                    )
+                    .await?;
+                }
+                PiEvent::ToolStart {
+                    id,
+                    name,
+                    args: input,
+                } => {
+                    if name == "seraph_agent" {
+                        let child_id =
+                            acp::SessionId::new(format!("{}-agent-{id}", args.session_id.0));
+                        let description = input
+                            .get("prompt")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|prompt| prompt.lines().next())
+                            .unwrap_or("SERAPH agent")
+                            .trim();
+                        self.notify_ext(
+                            &args.session_id,
+                            serde_json::json!({
+                                "sessionUpdate": "subagent_spawned",
+                                "subagent_id": child_id.0,
+                                "parent_session_id": args.session_id.0,
+                                "child_session_id": child_id.0,
+                                "subagent_type": "general-purpose",
+                                "description": description,
+                                "model": &session.model,
+                            }),
+                        )
+                        .await?;
+                        child_streams.insert(id.clone(), (child_id, String::new()));
+                    }
+                    let tool_call_id = acp::ToolCallId::from(id);
                     self.notify(
                         args.session_id.clone(),
                         acp::SessionUpdate::ToolCall(
-                            acp::ToolCall::new(tool_call_id.clone(), title)
+                            acp::ToolCall::new(tool_call_id, name)
                                 .status(acp::ToolCallStatus::InProgress)
-                                .raw_input(Some(call.arguments.clone())),
+                                .raw_input(Some(input)),
                         ),
                     )
                     .await?;
-                    let mut tools = self.tools.lock().await;
-                    let execution = execute_tool(
-                        &mut tools,
-                        &call.thread_id,
-                        &call.namespace,
-                        &call.tool,
-                        &call.arguments,
-                    )
-                    .await;
-                    let (text, success) = match execution {
-                        Ok(text) => (text, true),
-                        Err(error) => (format!("{error:#}"), false),
-                    };
+                }
+                PiEvent::ToolUpdate { id, result } => {
+                    if let Some((child_id, previous)) = child_streams.get_mut(&id)
+                        && let Some(text) = result
+                            .pointer("/content/0/text")
+                            .and_then(serde_json::Value::as_str)
+                    {
+                        let delta = text.strip_prefix(previous.as_str()).unwrap_or(text);
+                        if !delta.is_empty() {
+                            self.notify(
+                                child_id.clone(),
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    delta.into(),
+                                )),
+                            )
+                            .await?;
+                        }
+                        *previous = text.to_owned();
+                    }
                     self.notify(
                         args.session_id.clone(),
                         acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                            tool_call_id,
-                            acp::ToolCallUpdateFields::new()
-                                .status(Some(if success {
-                                    acp::ToolCallStatus::Completed
-                                } else {
-                                    acp::ToolCallStatus::Failed
-                                }))
-                                .raw_output(Some(serde_json::Value::String(text.clone()))),
+                            acp::ToolCallId::from(id),
+                            acp::ToolCallUpdateFields::new().raw_output(Some(result)),
                         )),
                     )
                     .await?;
-                    self.codex
-                        .lock()
-                        .await
-                        .respond_tool(call, ToolResult { text, success })
-                        .await
-                        .map_err(acp_error)?;
                 }
-                CodexEvent::TurnError(error) => return Err(acp_error(error)),
-                CodexEvent::TurnCompleted(turn) => {
-                    break if turn.get("status").and_then(serde_json::Value::as_str)
-                        == Some("interrupted")
-                    {
-                        acp::StopReason::Cancelled
-                    } else {
-                        acp::StopReason::EndTurn
-                    };
+                PiEvent::ToolEnd {
+                    id,
+                    result,
+                    is_error,
+                } => {
+                    if let Some((child_id, previous)) = child_streams.remove(&id) {
+                        if let Some(text) = result
+                            .pointer("/content/0/text")
+                            .and_then(serde_json::Value::as_str)
+                            && let Some(delta) = text.strip_prefix(&previous)
+                            && !delta.is_empty()
+                        {
+                            self.notify(
+                                child_id.clone(),
+                                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                    delta.into(),
+                                )),
+                            )
+                            .await?;
+                        }
+                        self.notify_ext(
+                            &args.session_id,
+                            serde_json::json!({
+                                "sessionUpdate": "subagent_finished",
+                                "subagent_id": child_id.0,
+                                "child_session_id": child_id.0,
+                                "status": if is_error { "failed" } else { "completed" },
+                                "error": if is_error { result.pointer("/content/0/text").cloned() } else { None },
+                                "tool_calls": 0,
+                                "turns": 1,
+                                "duration_ms": 0,
+                                "output": result.pointer("/content/0/text").cloned(),
+                            }),
+                        )
+                        .await?;
+                    }
+                    self.notify(
+                        args.session_id.clone(),
+                        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                            acp::ToolCallId::from(id),
+                            acp::ToolCallUpdateFields::new()
+                                .status(Some(if is_error {
+                                    acp::ToolCallStatus::Failed
+                                } else {
+                                    acp::ToolCallStatus::Completed
+                                }))
+                                .raw_output(Some(result)),
+                        )),
+                    )
+                    .await?;
                 }
+                PiEvent::Error(error) => return Err(acp_error(error)),
+                PiEvent::Settled => break acp::StopReason::EndTurn,
+                PiEvent::Other => {}
             }
         };
         self.cancellations.lock().await.remove(&args.session_id);
@@ -308,5 +494,29 @@ impl acp::Agent for SeraphAgent {
             cancel.cancel();
         }
         Ok(())
+    }
+
+    async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
+        if args.method.as_ref() != "x.ai/commands/list" {
+            return Ok(acp::ExtResponse::new(
+                serde_json::value::RawValue::NULL.to_owned().into(),
+            ));
+        }
+        let params: serde_json::Value =
+            serde_json::from_str(args.params.get()).map_err(acp_error)?;
+        let session_id = params
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(acp::Error::invalid_params)?;
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .get(&acp::SessionId::new(session_id))
+            .ok_or_else(acp::Error::invalid_params)?;
+        let response = serde_json::json!({ "commands": skills::commands(&session.skills) });
+        Ok(acp::ExtResponse::new(
+            serde_json::value::to_raw_value(&response)
+                .map_err(acp_error)?
+                .into(),
+        ))
     }
 }

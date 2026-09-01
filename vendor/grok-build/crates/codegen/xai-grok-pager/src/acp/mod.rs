@@ -727,6 +727,9 @@ async fn eager_auth_or_login_fallback(
     Option<serde_json::Value>,
 ) {
     if auth_methods.is_empty() {
+        if backend_installed() {
+            return (false, None, None, AuthStartMode::Pending, None);
+        }
         // preferred_method pin unavailable: fail closed, no invented method
         return (true, None, None, AuthStartMode::Pending, None);
     }

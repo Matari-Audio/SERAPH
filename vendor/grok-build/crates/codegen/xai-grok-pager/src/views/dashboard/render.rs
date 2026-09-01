@@ -550,7 +550,7 @@ fn render_dashboard_banner(
         return;
     }
 
-    // Build the title chip: `Dashboard · N agents · M working`.
+    // Build the title chip: `All chats · N agents · M working`.
     let mut total = 0usize;
     let mut working = 0usize;
     let mut needs_input = 0usize;
@@ -564,7 +564,7 @@ fn render_dashboard_banner(
         }
     }
     let agent_word = if total == 1 { "agent" } else { "agents" };
-    let mut title_parts: Vec<String> = vec!["Dashboard".to_string()];
+    let mut title_parts: Vec<String> = vec!["All chats".to_string()];
     title_parts.push(format!("{total} {agent_word}"));
     if working > 0 {
         title_parts.push(format!("{working} working"));

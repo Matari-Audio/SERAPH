@@ -50,12 +50,6 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-impl ToolCall {
-    pub fn id_string(&self) -> String {
-        self.id.to_string()
-    }
-}
-
 pub struct ToolResult {
     pub text: String,
     pub success: bool,
@@ -331,10 +325,24 @@ impl Codex {
         prompt: &str,
         effort: Option<&str>,
     ) -> Result<String> {
+        self.start_turn_with_model(thread_id, prompt, None, effort)
+            .await
+    }
+
+    pub async fn start_turn_with_model(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<String> {
         let mut params = json!({
             "threadId": thread_id,
             "input": [{ "type": "text", "text": prompt }],
         });
+        if let Some(model) = model {
+            params["model"] = Value::String(model.to_owned());
+        }
         if let Some(effort) = effort {
             params["effort"] = Value::String(effort.to_owned());
         }

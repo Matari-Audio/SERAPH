@@ -81,7 +81,7 @@ impl TitleManager {
 
         if !has_parts {
             self.composed.clear();
-            self.composed.push_str("grok");
+            self.composed.push_str("seraph");
         }
 
         let result = if self.composed != self.last_title {
@@ -104,9 +104,9 @@ impl TitleManager {
     }
 
     pub fn reset(&mut self) -> String {
-        let esc = build_title_escape("grok");
+        let esc = build_title_escape("seraph");
         self.last_title.clear();
-        self.last_title.push_str("grok");
+        self.last_title.push_str("seraph");
         self.spinner_frame = 0;
         self.tick_count = 0;
         esc
@@ -125,7 +125,7 @@ fn write_item(
     match item {
         TitleItem::Grok => {
             push_separator(buf, has_parts);
-            buf.push_str("grok");
+            buf.push_str("seraph");
         }
         TitleItem::Spinner => {
             if !state.is_busy && state.activity.is_none() {

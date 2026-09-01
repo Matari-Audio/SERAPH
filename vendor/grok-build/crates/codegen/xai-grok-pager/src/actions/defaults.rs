@@ -695,7 +695,7 @@ pub(super) fn default_actions(
             id: ActionId::ToggleMultiline,
             label: "multiline",
             description: "Toggle multiline",
-            default_key: key!('m', CONTROL),
+            default_key: key!('m', CONTROL | ALT),
             alt_keys: vec![],
             category: Category::Input,
             context: When::PromptFocused,
@@ -703,7 +703,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Toggles a persistent multi-line prompt so the editor stays expanded for composing longer messages.\nInsert newlines with Shift+Enter or Alt+Enter (or a trailing backslash); bare Enter still sends.\nCtrl+M toggles multiline in the prompt; off the prompt it opens the model picker.",
+                "Toggles a persistent multi-line prompt so the editor stays expanded for composing longer messages.\nInsert newlines with Shift+Enter or Alt+Enter (or a trailing backslash); bare Enter still sends.\nCtrl+Alt+M toggles multiline; Ctrl+M opens the model picker.",
             ),
         },
         ActionDef {
@@ -841,7 +841,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens the model picker to switch the model for this session; the choice applies to later turns.\nBound to Ctrl+M, but while the prompt is focused that chord toggles multiline instead.\nReach it from the scrollback or the command palette.",
+                "Opens the model picker to switch the model for this session; the choice applies to later turns.\nBound to Ctrl+M everywhere in the session.",
             ),
         },
         ActionDef {

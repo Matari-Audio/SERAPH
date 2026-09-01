@@ -63,6 +63,15 @@ function providers(id) {
   send({ id, result });
 }
 
+function models(id, provider = codexProvider) {
+  send({ id, result: runtime.getModels(provider).map((model) => ({
+    id: model.id,
+    name: model.name,
+    reasoning: model.reasoning === true,
+    thinkingLevelMap: model.thinkingLevelMap || {},
+  })) });
+}
+
 function startLogin(id, provider, authType) {
   if (login) return send({ id, error: "Login already in progress" });
   if (!runtime.getProvider(provider)?.auth?.[authType]) {
@@ -122,6 +131,7 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
     request = JSON.parse(line);
     if (request.method === "tokens") await tokens(request.id, request.force === true);
     else if (request.method === "providers") providers(request.id);
+    else if (request.method === "models") models(request.id, request.provider);
     else if (request.method === "login") startLogin(request.id, request.provider, request.authType);
     else if (request.method === "prompt") {
       if (!pendingPrompt) throw new Error("No login prompt is waiting");

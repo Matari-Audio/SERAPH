@@ -158,6 +158,18 @@ impl AgentView {
         //
         // `slash_accepted_send` is set when Enter accepts a no-arg slash command and needs to fall through to the send path
         // This flag bypasses the multiline-mode swap of Enter to newline so the command is actually sent
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.prompt.slash_open()
+            && let Some(command) = self.prompt.take_hash_command(&self.session.models)
+        {
+            return match command.as_str() {
+                "login" => InputOutcome::Action(Action::Login),
+                "settings" => InputOutcome::Action(Action::OpenSettings),
+                "model" => self.handle_agent_action_with_registry(ActionId::ModelPicker, registry),
+                _ => InputOutcome::Changed,
+            };
+        }
         let mut slash_accepted_send = false;
         if key.code == KeyCode::Enter
             && key.modifiers.is_empty()
@@ -219,6 +231,7 @@ impl AgentView {
                 }
                 // Enter: accept completion, then send (terminal row) or stay open (a row whose insert_text ends with a space chains)
                 KeyCode::Enter if key.modifiers.is_empty() => {
+                    let sigil = self.prompt.active_sigil();
                     let snap = self.prompt.slash_snapshot();
                     let exact_command = crate::slash::is_typed_slash_selected(
                         &snap,
@@ -235,7 +248,7 @@ impl AgentView {
                             .is_some_and(|row| row.insert_text.ends_with(' '));
                         self.prompt.slash_commit_preview();
                         self.prompt.accept_slash_completion(&self.session.models);
-                        if chains {
+                        if chains || sigil == Some('$') {
                             return InputOutcome::Changed;
                         }
                         self.prompt.slash_close();

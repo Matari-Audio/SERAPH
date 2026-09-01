@@ -4,7 +4,9 @@ mod codex;
 mod grok_ui;
 mod kernel;
 mod pi_auth;
+mod pi_rpc;
 mod seraph_acp;
+mod skills;
 mod tasks;
 mod tui;
 
@@ -21,6 +23,7 @@ use agents::{AgentManager, ChildCommand, ChildEvent};
 use anyhow::{Context, Result, bail};
 use codex::{Codex, CodexEvent, LoginEvent, ToolResult};
 use kernel::Kernel;
+use pi_rpc::PiEvent;
 use seraph::edit_patch::{AppliedPatch, apply_prepared_edits, prepare_exact_patch};
 use serde_json::{Value, json};
 use tasks::TaskBoard;
@@ -76,6 +79,15 @@ async fn run() -> Result<()> {
     let Some(command) = args.next() else {
         return run_chat().await;
     };
+    if command == "__kernel" {
+        if env::var_os("SERAPH_KERNEL_CHILD").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            bail!("internal kernel admission missing");
+        }
+        if args.next().is_some() {
+            bail!("internal kernel accepts requests on stdin");
+        }
+        return run_kernel_child().await;
+    }
     if command == "__agent" {
         if env::var_os("SERAPH_AGENT_CHILD").as_deref() != Some(std::ffi::OsStr::new("1")) {
             bail!("internal agent admission missing");
@@ -86,7 +98,7 @@ async fn run() -> Result<()> {
         return run_headless_agent().await;
     }
     if command != "exec" {
-        bail!("usage: seraph [exec '<python cell>' ['<python cell>' ...]]");
+        return run_chat().await;
     }
 
     let cells: Vec<String> = args.collect();
@@ -109,6 +121,41 @@ async fn run() -> Result<()> {
         }
     }
 
+    kernel.shutdown().await
+}
+
+async fn run_kernel_child() -> Result<()> {
+    let kernel = Kernel::spawn().await?;
+    let mut requests = BufReader::new(tokio::io::stdin()).lines();
+    let mut output = tokio::io::stdout();
+    while let Some(line) = requests.next_line().await? {
+        let request: Value = serde_json::from_str(&line).context("decode kernel request")?;
+        let id = request
+            .get("id")
+            .and_then(Value::as_u64)
+            .context("kernel request omitted id")?;
+        let code = request
+            .get("code")
+            .and_then(Value::as_str)
+            .context("kernel request omitted code")?;
+        let response = match kernel.execute(code).await {
+            Ok(result) => json!({
+                "id": id,
+                "ok": true,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "background_stdout": result.background_stdout,
+                "background_stderr": result.background_stderr,
+                "emitted": result.emitted,
+                "truncated": result.truncated,
+            }),
+            Err(error) => json!({ "id": id, "ok": false, "error": format!("{error:#}") }),
+        };
+        let mut line = serde_json::to_vec(&response)?;
+        line.push(b'\n');
+        output.write_all(&line).await?;
+        output.flush().await?;
+    }
     kernel.shutdown().await
 }
 
@@ -151,57 +198,61 @@ async fn run_chat() -> Result<()> {
 }
 
 async fn run_headless_agent() -> Result<()> {
-    let project = env::current_dir().context("read current directory")?;
-    let mut codex = Codex::spawn().await?;
-    if !signed_in(&codex.account(false).await?) {
-        bail!("Codex account is signed out");
-    }
-    let (model, _, _) = select_model(&codex.models().await?)?;
-    let thread_id = codex.start_thread(&project, Some(&model)).await?;
-    let mut tools = ToolHost {
-        kernel: None,
-        task_board: None,
-        edits: BTreeMap::new(),
-        next_edit_handle: 1,
-        project: project.clone(),
-        agents: AgentManager::new(project, None)?,
-    };
-    let mut commands = BufReader::new(tokio::io::stdin()).lines();
-    let mut output = tokio::io::stdout();
-    write_child_event(&mut output, &ChildEvent::Ready).await?;
-    let initial = read_child_command(&mut commands)
-        .await?
-        .context("SERAPH agent control stream closed before start")?;
-    let ChildCommand::Start { prompt } = initial else {
-        bail!("first SERAPH agent command must be start");
-    };
-    validate_agent_prompt(&prompt)?;
-    let agent_id = env::var("SERAPH_AGENT_ID").context("SERAPH agent id missing")?;
-    let submission = codex
-        .queue_turn(
-            &thread_id,
-            &prompt,
-            &format!("seraph-agent-{agent_id}-initial"),
+    return run_pi_child().await;
+
+    #[allow(unreachable_code)]
+    {
+        let project = env::current_dir().context("read current directory")?;
+        let mut codex = Codex::spawn().await?;
+        if !signed_in(&codex.account(false).await?) {
+            bail!("Codex account is signed out");
+        }
+        let (model, _, _) = select_model(&codex.models().await?)?;
+        let thread_id = codex.start_thread(&project, Some(&model)).await?;
+        let mut tools = ToolHost {
+            kernel: None,
+            task_board: None,
+            edits: BTreeMap::new(),
+            next_edit_handle: 1,
+            project: project.clone(),
+            agents: AgentManager::new(project, None)?,
+        };
+        let mut commands = BufReader::new(tokio::io::stdin()).lines();
+        let mut output = tokio::io::stdout();
+        write_child_event(&mut output, &ChildEvent::Ready).await?;
+        let initial = read_child_command(&mut commands)
+            .await?
+            .context("SERAPH agent control stream closed before start")?;
+        let ChildCommand::Start { prompt } = initial else {
+            bail!("first SERAPH agent command must be start");
+        };
+        validate_agent_prompt(&prompt)?;
+        let agent_id = env::var("SERAPH_AGENT_ID").context("SERAPH agent id missing")?;
+        let submission = codex
+            .queue_turn(
+                &thread_id,
+                &prompt,
+                &format!("seraph-agent-{agent_id}-initial"),
+            )
+            .await?;
+        let mut turn_id = Some(codex.start_queued_turn(&thread_id, &submission).await?);
+        write_child_event(
+            &mut output,
+            &ChildEvent::Running {
+                key: None,
+                result: None,
+            },
         )
         .await?;
-    let mut turn_id = Some(codex.start_queued_turn(&thread_id, &submission).await?);
-    write_child_event(
-        &mut output,
-        &ChildEvent::Running {
-            key: None,
-            result: None,
-        },
-    )
-    .await?;
 
-    let mut pending = VecDeque::new();
-    let mut answer = String::new();
-    let mut answer_truncated = false;
-    let mut turn_error = None;
-    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
-    let mut shutting_down = false;
-    let mut turn_stopping = false;
-    let result: Result<()> = async {
+        let mut pending = VecDeque::new();
+        let mut answer = String::new();
+        let mut answer_truncated = false;
+        let mut turn_error = None;
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+        let mut shutting_down = false;
+        let mut turn_stopping = false;
+        let result: Result<()> = async {
         loop {
             let Some(active_turn) = turn_id.as_deref() else {
                 let command = read_child_command(&mut commands)
@@ -311,6 +362,13 @@ async fn run_headless_agent() -> Result<()> {
                     deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
                 }
                 Next::Event(Ok(CodexEvent::AgentMessageDelta(delta))) => {
+                    write_child_event(
+                        &mut output,
+                        &ChildEvent::MessageDelta {
+                            text: delta.clone(),
+                        },
+                    )
+                    .await?;
                     if !answer_truncated
                         && append_bounded(&mut answer, &delta, MAX_AGENT_RESULT_BYTES)
                     {
@@ -476,18 +534,71 @@ async fn run_headless_agent() -> Result<()> {
         Ok(())
     }
     .await;
-    if let Err(error) = &result {
+        if let Err(error) = &result {
+            write_child_event(
+                &mut output,
+                &ChildEvent::Failed {
+                    error: bounded_error(error),
+                },
+            )
+            .await?;
+        }
+        tools.shutdown().await?;
+        codex.shutdown().await?;
+        result?;
+        write_child_event(&mut output, &ChildEvent::Stopped).await
+    }
+}
+
+async fn run_pi_child() -> Result<()> {
+    let project = env::current_dir().context("read current directory")?;
+    let mut backend = pi_rpc::PiRpc::spawn(&project, "gpt-5.6-sol", Some("medium")).await?;
+    let mut commands = BufReader::new(tokio::io::stdin()).lines();
+    let mut output = tokio::io::stdout();
+    write_child_event(&mut output, &ChildEvent::Ready).await?;
+    while let Some(command) = read_child_command(&mut commands).await? {
+        let prompt = match command {
+            ChildCommand::Start { prompt } | ChildCommand::FollowUp { prompt, .. } => prompt,
+            ChildCommand::Interrupt => {
+                backend.abort().await?;
+                write_child_event(&mut output, &ChildEvent::Interrupted { accepted: true }).await?;
+                continue;
+            }
+            ChildCommand::Shutdown => break,
+        };
+        validate_agent_prompt(&prompt)?;
         write_child_event(
             &mut output,
-            &ChildEvent::Failed {
-                error: bounded_error(error),
+            &ChildEvent::Running {
+                key: None,
+                result: None,
             },
         )
         .await?;
+        backend.prompt(&prompt).await?;
+        let mut answer = String::new();
+        loop {
+            match backend.next_event().await? {
+                PiEvent::TextDelta(text) => {
+                    append_bounded(&mut answer, &text, MAX_AGENT_RESULT_BYTES);
+                    write_child_event(&mut output, &ChildEvent::MessageDelta { text }).await?;
+                }
+                PiEvent::Error(error) => {
+                    write_child_event(&mut output, &ChildEvent::Failed { error }).await?;
+                    break;
+                }
+                PiEvent::Settled => {
+                    write_child_event(&mut output, &ChildEvent::Idle { result: answer }).await?;
+                    break;
+                }
+                PiEvent::ThinkingDelta(_)
+                | PiEvent::ToolStart { .. }
+                | PiEvent::ToolUpdate { .. }
+                | PiEvent::ToolEnd { .. }
+                | PiEvent::Other => {}
+            }
+        }
     }
-    tools.shutdown().await?;
-    codex.shutdown().await?;
-    result?;
     write_child_event(&mut output, &ChildEvent::Stopped).await
 }
 
