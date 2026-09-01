@@ -4,7 +4,15 @@ Stateful Execution Runtime for Agentic Programmatic Harness.
 
 SERAPH is an independent Rust and Ratatui agent harness that programs a persistent Python execution environment while keeping capabilities, artifacts, workflows, and agent coordination outside the model context until needed.
 
-The first executable spine is available now:
+Run the Codex-backed terminal chat:
+
+```sh
+cargo run
+```
+
+SERAPH uses the installed `codex app-server` for ChatGPT authentication, model discovery, and streaming. Existing Codex login state is reused without exposing tokens to SERAPH; when signed out, press `L` to start the official browser login. Use `<` and `>` on an empty composer to change reasoning effort, `?` for help, and `Ctrl+C` to quit.
+
+The model can call SERAPH's persistent Python kernel as `seraph.python`. The standalone kernel path remains available:
 
 ```sh
 cargo run -- exec \
