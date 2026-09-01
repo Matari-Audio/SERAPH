@@ -214,17 +214,20 @@ impl Codex {
                 }, {
                     "type": "function",
                     "name": "agents",
-                    "description": "Spawn and join SERAPH-native agents with shared project state",
+                    "description": "Run and durably message SERAPH-native agents. Addresses are main or agent:<id>; receive atomically consumes the caller's inbox",
                     "deferLoading": true,
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["spawn", "list", "wait", "interrupt"]
+                                "enum": ["spawn", "list", "wait", "interrupt", "send", "receive"]
                             },
                             "id": { "type": "integer", "minimum": 1 },
                             "prompt": { "type": "string", "maxLength": 16384 },
+                            "recipient": { "type": "string", "pattern": "^(main|agent:[1-9][0-9]*)$" },
+                            "message": { "type": "string", "maxLength": 16384 },
+                            "key": { "type": "string", "maxLength": 128 },
                             "ids": {
                                 "type": "array",
                                 "items": { "type": "integer", "minimum": 1 },

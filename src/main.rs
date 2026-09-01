@@ -20,6 +20,7 @@ use tui::{UiCommand, UiEvent};
 
 const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
 const MAX_AGENT_RESULT_BYTES: usize = 2 * 1024;
+const MAX_AGENT_MESSAGE_BYTES: usize = 16 * 1024;
 
 enum LoginOutcome {
     Complete,
@@ -715,6 +716,42 @@ async fn execute_agents(manager: &AgentManager, arguments: &Value) -> Result<Val
                 .filter(|id| *id > 0)
                 .context("interrupt requires a positive integer id")?;
             Ok(json!({ "id": id, "interrupted": manager.interrupt(id).await? }))
+        }
+        "send" => {
+            let recipient = arguments
+                .get("recipient")
+                .and_then(Value::as_str)
+                .context("send requires a string recipient")?;
+            let message = arguments
+                .get("message")
+                .and_then(Value::as_str)
+                .context("send requires a string message")?;
+            let key = arguments
+                .get("key")
+                .and_then(Value::as_str)
+                .context("send requires a string idempotency key")?;
+            if message.trim().is_empty()
+                || serde_json::to_vec(message)?.len().saturating_sub(2) > MAX_AGENT_MESSAGE_BYTES
+            {
+                bail!("JSON-encoded message content must contain 1 to 16384 bytes");
+            }
+            if key.trim().is_empty() || key.len() > 128 {
+                bail!("key must contain 1 to 128 bytes");
+            }
+            manager.send(recipient, message, key)
+        }
+        "receive" => {
+            let limit = arguments
+                .get("limit")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|limit| (1..=200).contains(limit))
+                        .context("limit must be an integer from 1 to 200")
+                })
+                .transpose()?
+                .unwrap_or(20) as usize;
+            manager.receive(limit, MAX_TOOL_RESULT_BYTES)
         }
         action => bail!("unknown agent action {action:?}"),
     }

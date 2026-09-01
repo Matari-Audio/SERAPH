@@ -4,10 +4,7 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
     path::PathBuf,
     process::Stdio,
-    sync::{
-        Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -21,6 +18,7 @@ use tokio::{
     task::{AbortHandle, JoinHandle},
 };
 
+use crate::tasks::TaskBoard;
 use crate::tui::{AgentSummary, UiEvent};
 
 const MAX_RESULT_BYTES: usize = 2_048;
@@ -31,12 +29,13 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub struct AgentManager {
     executable: PathBuf,
     project: PathBuf,
+    address: String,
     inner: Arc<Inner>,
+    mailbox: StdMutex<TaskBoard>,
     aborts: StdMutex<Vec<AbortHandle>>,
 }
 
 struct Inner {
-    next_id: AtomicU64,
     records: Mutex<BTreeMap<u64, AgentRecord>>,
     changed: Notify,
     ui: Option<mpsc::Sender<UiEvent>>,
@@ -59,15 +58,29 @@ enum AgentStatus {
 
 impl AgentManager {
     pub fn new(project: PathBuf, ui: Option<mpsc::Sender<UiEvent>>) -> Result<Self> {
+        let mailbox = TaskBoard::open(&project)?;
+        let address = match env::var("SERAPH_AGENT_ID") {
+            Ok(id) => {
+                let id = id
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|id| *id > 0)
+                    .context("invalid SERAPH agent id")?;
+                format!("agent:{id}")
+            }
+            Err(env::VarError::NotPresent) => "main".into(),
+            Err(error) => return Err(error).context("read SERAPH agent id"),
+        };
         Ok(Self {
             executable: env::current_exe().context("locate SERAPH executable")?,
             project,
+            address,
             inner: Arc::new(Inner {
-                next_id: AtomicU64::new(1),
                 records: Mutex::new(BTreeMap::new()),
                 changed: Notify::new(),
                 ui,
             }),
+            mailbox: StdMutex::new(mailbox),
             aborts: StdMutex::new(Vec::new()),
         })
     }
@@ -80,11 +93,6 @@ impl AgentManager {
         if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
             bail!("agent prompt must contain 1 to 16384 bytes");
         }
-        let id = self
-            .inner
-            .next_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| anyhow::anyhow!("agent id space exhausted"))?;
         let mut records = self.inner.records.lock().await;
         if records
             .values()
@@ -94,10 +102,16 @@ impl AgentManager {
         {
             bail!("at most {MAX_RUNNING_AGENTS} agents may run concurrently");
         }
+        let id = self
+            .mailbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent mailbox poisoned"))?
+            .allocate_agent_id()?;
         let mut command = Command::new(&self.executable);
         command
             .arg("__agent")
             .env("SERAPH_AGENT_CHILD", "1")
+            .env("SERAPH_AGENT_ID", id.to_string())
             .current_dir(&self.project)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -189,7 +203,7 @@ impl AgentManager {
         drop(records);
         self.publish().await;
 
-        Ok(json!({ "id": id, "status": "running" }))
+        Ok(json!({ "id": id, "address": format!("agent:{id}"), "status": "running" }))
     }
 
     pub async fn list(&self, after_id: u64, limit: usize) -> Value {
@@ -253,6 +267,32 @@ impl AgentManager {
         Ok(stop.is_some_and(|stop| stop.send(()).is_ok()))
     }
 
+    pub fn send(&self, recipient: &str, message: &str, key: &str) -> Result<Value> {
+        validate_address(recipient)?;
+        let mut mailbox = self
+            .mailbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent mailbox poisoned"))?;
+        if let Some(id) = recipient
+            .strip_prefix("agent:")
+            .and_then(|id| id.parse().ok())
+            && !mailbox.agent_exists(id)?
+        {
+            bail!("recipient {recipient} does not exist");
+        }
+        let (id, inserted) = mailbox.send_message(&self.address, recipient, message, key)?;
+        Ok(
+            json!({ "id": id, "sender": self.address, "recipient": recipient, "inserted": inserted }),
+        )
+    }
+
+    pub fn receive(&self, limit: usize, max_projection_bytes: usize) -> Result<Value> {
+        self.mailbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent mailbox poisoned"))?
+            .receive_messages(&self.address, limit, max_projection_bytes)
+    }
+
     pub async fn shutdown(&self) {
         let (stops, tasks): (Vec<_>, Vec<_>) = {
             let mut records = self.inner.records.lock().await;
@@ -282,6 +322,18 @@ impl AgentManager {
             let _ = ui.send(UiEvent::AgentsChanged(summaries)).await;
         }
     }
+}
+
+fn validate_address(address: &str) -> Result<()> {
+    if address == "main"
+        || address
+            .strip_prefix("agent:")
+            .and_then(|id| id.parse::<u64>().ok())
+            .is_some_and(|id| id > 0 && address == format!("agent:{id}"))
+    {
+        return Ok(());
+    }
+    bail!("recipient must be main or agent:<positive id>")
 }
 
 impl AgentRecord {
