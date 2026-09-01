@@ -31,6 +31,10 @@ jobs:
           node-version: 22.19
           cache: npm
       - run: npm ci --omit=dev
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - if: runner.os == 'macOS'
+        run: brew install protobuf
       - run: cargo build --release --locked
       - name: Package
         shell: bash
