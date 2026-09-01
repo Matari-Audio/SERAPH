@@ -149,6 +149,8 @@ struct App {
     busy: bool,
     streaming: bool,
     show_help: bool,
+    show_agents_menu: bool,
+    agents_menu_cursor: usize,
     agents: Vec<AgentSummary>,
     tasks: TaskSnapshot,
     dock_focused: bool,
@@ -181,6 +183,8 @@ impl App {
             busy: false,
             streaming: false,
             show_help: false,
+            show_agents_menu: false,
+            agents_menu_cursor: 0,
             agents: Vec::new(),
             tasks: TaskSnapshot {
                 total: 0,
@@ -323,6 +327,7 @@ impl App {
             UiEvent::AgentsChanged(agents) => {
                 self.agents = agents;
                 self.selected_agent = self.selected_agent.min(self.agents.len().saturating_sub(1));
+                self.agents_menu_cursor = self.agents_menu_cursor.min(self.agents.len() + 1);
             }
             UiEvent::TasksChanged(tasks) => self.tasks = tasks,
             UiEvent::Notice(text) => self.messages.push(Message {
@@ -405,6 +410,47 @@ impl App {
         {
             let _ = commands.try_send(UiCommand::Quit);
             return false;
+        }
+        let agents_menu_key = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('\\' | '4'));
+        let all_agents_key = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('g' | 'G'));
+        if self.show_agents_menu && !self.auth_pending {
+            match key.code {
+                KeyCode::Esc => self.show_agents_menu = false,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.agents_menu_cursor = self.agents_menu_cursor.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.agents_menu_cursor =
+                        (self.agents_menu_cursor + 1).min(self.agents.len() + 1)
+                }
+                KeyCode::Enter => {
+                    self.show_agents_menu = false;
+                    match self.agents_menu_cursor {
+                        0 => self.view = View::Agents,
+                        1 => {}
+                        index => {
+                            self.selected_agent = index - 2;
+                            self.view = View::Agents;
+                        }
+                    }
+                }
+                _ if agents_menu_key => self.show_agents_menu = false,
+                _ if all_agents_key => {
+                    self.show_agents_menu = false;
+                    self.view = View::Agents;
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if agents_menu_key && !self.auth_pending && self.view == View::Chat {
+            self.set_dock_focused(false);
+            self.show_help = false;
+            self.show_agents_menu = true;
+            self.agents_menu_cursor = 0;
+            return true;
         }
         if self.dock_focused {
             let data = dock_data(self);
@@ -552,9 +598,7 @@ impl App {
                 _ => {}
             }
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('g' | 'G'))
-        {
+        if all_agents_key {
             self.view = View::Agents;
             return true;
         }
@@ -714,6 +758,7 @@ fn render(frame: &mut Frame, app: &App) {
             Line::from("Enter    send"),
             Line::from("Alt+Enter      newline"),
             Line::from("< / >    reasoning effort"),
+            Line::from("Ctrl+\\        agents menu"),
             Line::from("↓ / Ctrl+G     all agents"),
             Line::from("L              sign in / switch account"),
             Line::from("? / Esc  close help"),
@@ -748,6 +793,9 @@ fn render(frame: &mut Frame, app: &App) {
         Paragraph::new(footer_line(app, footer_area.width)),
         footer_area,
     );
+    if app.show_agents_menu && !app.auth_pending {
+        render_agents_menu(frame, app);
+    }
     if app.auth_pending {
         render_login(frame, app);
     }
@@ -957,21 +1005,85 @@ fn header_line(app: &App, width: u16) -> Line<'static> {
         Span::styled(" SERAPH", Style::default().fg(TEXT).bold()),
         Span::styled(format!("  {cwd}"), Style::default().fg(MUTED)),
     ]);
-    let mut right = vec![Span::styled("● main", Style::default().fg(GREEN))];
-    for agent in app.agents.iter().take(4) {
-        right.push(Span::styled("  ", Style::default()));
-        right.push(Span::styled(
-            format!("{} a{}", status_icon(agent.status, app.tick), agent.id),
-            Style::default().fg(status_color(agent.status)),
-        ));
-    }
-    if app.agents.len() > 4 {
-        right.push(Span::styled(
-            format!("  +{}", app.agents.len() - 4),
-            Style::default().fg(MUTED),
-        ));
-    }
+    let menu_style = if app.show_agents_menu {
+        Style::default().fg(BLUE).bold()
+    } else {
+        Style::default().fg(GROKNIGHT.gray_bright)
+    };
+    let right = vec![
+        Span::styled("● main", Style::default().fg(GREEN)),
+        Span::styled(
+            format!(
+                "  Agents {} {}",
+                app.agents.len() + 1,
+                if app.show_agents_menu { "▴" } else { "▾" }
+            ),
+            menu_style,
+        ),
+    ];
     joined_line(left, Line::from(right), width)
+}
+
+fn render_agents_menu(frame: &mut Frame, app: &App) {
+    let outer = frame.area();
+    let width = outer.width.min(42);
+    let height = (app.agents.len() + 2).min(outer.height.saturating_sub(2) as usize) as u16;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let area = ratatui::layout::Rect::new(outer.right() - width, outer.y + 1, width, height);
+    let start = app
+        .agents_menu_cursor
+        .saturating_add(1)
+        .saturating_sub(height as usize);
+    let mut rows = Vec::with_capacity(height as usize);
+    for index in start..(app.agents.len() + 2).min(start + height as usize) {
+        let mut row = match index {
+            0 => joined_line(
+                Line::from(Span::styled(
+                    " All agents",
+                    Style::default().fg(TEXT).bold(),
+                )),
+                Line::from(Span::styled("Ctrl+G ", Style::default().fg(MUTED))),
+                width,
+            ),
+            1 => joined_line(
+                Line::from(Span::styled(" ● main", Style::default().fg(GREEN).bold())),
+                Line::from(Span::styled("connected ", Style::default().fg(MUTED))),
+                width,
+            ),
+            _ => {
+                let agent = &app.agents[index - 2];
+                joined_line(
+                    Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            status_icon(agent.status, app.tick),
+                            Style::default().fg(status_color(agent.status)),
+                        ),
+                        Span::styled(
+                            format!(" agent {}", agent.id),
+                            Style::default().fg(TEXT).bold(),
+                        ),
+                    ]),
+                    Line::from(Span::styled(
+                        format!("{} ", agent.status),
+                        Style::default().fg(MUTED),
+                    )),
+                    width,
+                )
+            }
+        };
+        if index == app.agents_menu_cursor {
+            row.style = Style::default().bg(PANEL);
+        }
+        rows.push(row);
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(rows).style(Style::default().bg(BG).fg(TEXT)),
+        area,
+    );
 }
 
 fn dock_height(app: &App) -> u16 {
