@@ -56,6 +56,7 @@ pub fn overlay_cycle_order(
         &state.filter,
         home,
     );
+    let rows = render::arrange_project_rows(rows, &state.cwd);
     rows.iter()
         .filter_map(|r| match &r.id {
             DashboardRowId::TopLevel(id) if !r.is_more_placeholder => Some(*id),

@@ -1781,8 +1781,10 @@ pub(super) fn dashboard_neighbor_row(
             roster,
         )
     };
-    let focusables = crate::views::dashboard::render::focusables(
+    let rows = crate::views::dashboard::render::arrange_project_rows(rows, &d.cwd);
+    let focusables = crate::views::dashboard::render::focusables_for_roster(
         &rows,
+        &d.cwd,
         d.grouping,
         &d.filter,
         &d.collapsed_sections,
@@ -2104,10 +2106,12 @@ pub(super) fn dispatch_dashboard_select(app: &mut AppView, next: bool) {
             roster,
         )
     };
+    let rows = crate::views::dashboard::render::arrange_project_rows(rows, &d.cwd);
     // Unified, display-order cursor targets: section headers AND visible rows (a collapsed section contributes only its header)
     // Placeholders are excluded
-    let focusables = crate::views::dashboard::render::focusables(
+    let focusables = crate::views::dashboard::render::focusables_for_roster(
         &rows,
+        &d.cwd,
         d.grouping,
         &d.filter,
         &d.collapsed_sections,

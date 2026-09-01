@@ -231,7 +231,8 @@ fn build_local_rows(
     let mut rows = Vec::new();
     for (id, agent) in agents.iter() {
         let top_id = DashboardRowId::TopLevel(*id);
-        if is_empty_top_level(agent)
+        if id.0 != 0
+            && is_empty_top_level(agent)
             && !pinned.contains(&top_id)
             && !matches!(
                 classify_top_level(agent),
