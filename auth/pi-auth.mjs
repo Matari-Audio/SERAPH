@@ -59,10 +59,24 @@ function startLogin(id, method) {
         },
       });
       return new Promise((resolve, reject) => {
-        const abort = () => reject(new Error("Login cancelled"));
-        prompt.signal?.addEventListener("abort", abort, { once: true });
-        pendingPrompt = (value) => {
+        let settled = false;
+        const cleanup = () => {
           prompt.signal?.removeEventListener("abort", abort);
+          controller.signal.removeEventListener("abort", abort);
+        };
+        const abort = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          pendingPrompt = undefined;
+          reject(new Error("Login cancelled"));
+        };
+        prompt.signal?.addEventListener("abort", abort, { once: true });
+        controller.signal.addEventListener("abort", abort, { once: true });
+        pendingPrompt = (value) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
           pendingPrompt = undefined;
           resolve(value);
         };
