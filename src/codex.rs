@@ -187,7 +187,7 @@ impl Codex {
                 }, {
                     "type": "function",
                     "name": "edit",
-                    "description": "Apply a strict update-only Codex patch or roll it back with a session-scoped handle",
+                    "description": "Apply a strict add, update, or delete Codex patch, or roll it back with a session-scoped handle",
                     "deferLoading": true,
                     "inputSchema": {
                         "type": "object",
