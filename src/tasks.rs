@@ -31,6 +31,13 @@ impl TaskBoard {
                      blocker_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                      PRIMARY KEY (task_id, blocker_id),
                      CHECK (task_id <> blocker_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS task_claim_attempts (
+                     id INTEGER PRIMARY KEY,
+                     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                     actor TEXT NOT NULL CHECK (trim(actor) <> ''),
+                     claimed INTEGER NOT NULL CHECK (claimed IN (0, 1)),
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch())
                  );",
             )
             .context("initialize SERAPH task database")?;
@@ -111,7 +118,7 @@ impl TaskBoard {
         }))?)
     }
 
-    pub fn claim(&mut self, id: i64, owner: &str) -> Result<bool> {
+    pub fn claim(&mut self, id: i64, owner: &str) -> Result<(bool, Option<i64>)> {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -127,8 +134,14 @@ impl TaskBoard {
                )",
             params![id, owner],
         )? == 1;
+        let recorded = tx.execute(
+            "INSERT INTO task_claim_attempts (task_id, actor, claimed)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?1)",
+            params![id, owner, claimed],
+        )? == 1;
+        let attempt_id = recorded.then(|| tx.last_insert_rowid());
         tx.commit()?;
-        Ok(claimed)
+        Ok((claimed, attempt_id))
     }
 
     pub fn complete(&mut self, id: i64, owner: &str) -> Result<Option<(Vec<i64>, bool)>> {

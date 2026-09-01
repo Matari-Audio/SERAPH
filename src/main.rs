@@ -1,3 +1,4 @@
+mod agents;
 mod capability;
 mod codex;
 mod kernel;
@@ -6,15 +7,17 @@ mod tui;
 
 use std::{env, path::PathBuf, process::ExitCode, time::Duration};
 
+use agents::AgentManager;
 use anyhow::{Context, Result, bail};
 use codex::{Codex, CodexEvent, ToolResult};
 use kernel::Kernel;
 use serde_json::{Value, json};
 use tasks::TaskBoard;
-use tokio::sync::mpsc;
+use tokio::{io::AsyncReadExt, sync::mpsc};
 use tui::{UiCommand, UiEvent};
 
 const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
+const MAX_AGENT_RESULT_BYTES: usize = 2 * 1024;
 
 enum LoginOutcome {
     Complete,
@@ -23,9 +26,20 @@ enum LoginOutcome {
 }
 
 struct ToolHost {
-    kernel: Kernel,
+    kernel: Option<Kernel>,
     task_board: Option<TaskBoard>,
     project: PathBuf,
+    agents: AgentManager,
+}
+
+impl ToolHost {
+    async fn shutdown(self) -> Result<()> {
+        self.agents.shutdown().await;
+        if let Some(kernel) = self.kernel {
+            kernel.shutdown().await?;
+        }
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -44,6 +58,24 @@ async fn run() -> Result<()> {
     let Some(command) = args.next() else {
         return run_chat().await;
     };
+    if command == "__agent" {
+        if env::var_os("SERAPH_AGENT_CHILD").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            bail!("internal agent admission missing");
+        }
+        if args.next().is_some() {
+            bail!("internal agent accepts its prompt on stdin");
+        }
+        let mut prompt = String::new();
+        tokio::io::stdin()
+            .take(16 * 1024 + 1)
+            .read_to_string(&mut prompt)
+            .await
+            .context("read internal agent prompt")?;
+        if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
+            bail!("internal agent prompt must contain 1 to 16384 bytes");
+        }
+        return run_headless_agent(&prompt).await;
+    }
     if command != "exec" {
         bail!("usage: seraph [exec '<python cell>' ['<python cell>' ...]]");
     }
@@ -100,6 +132,69 @@ async fn run_chat() -> Result<()> {
     }
 }
 
+async fn run_headless_agent(prompt: &str) -> Result<()> {
+    let project = env::current_dir().context("read current directory")?;
+    let mut codex = Codex::spawn().await?;
+    if !signed_in(&codex.account(false).await?) {
+        bail!("Codex account is signed out");
+    }
+    let (model, _, _) = select_model(&codex.models().await?)?;
+    let thread_id = codex.start_thread(&project, Some(&model)).await?;
+    let mut tools = ToolHost {
+        kernel: None,
+        task_board: None,
+        project: project.clone(),
+        agents: AgentManager::new(project)?,
+    };
+    let result = run_headless_turn(&mut codex, &mut tools, &thread_id, prompt).await;
+    tools.shutdown().await?;
+    codex.shutdown().await?;
+    print!("{}", result?);
+    Ok(())
+}
+
+async fn run_headless_turn(
+    codex: &mut Codex,
+    tools: &mut ToolHost,
+    thread_id: &str,
+    prompt: &str,
+) -> Result<String> {
+    let (events, mut event_rx) = mpsc::channel(64);
+    let (commands, mut command_rx) = mpsc::channel(1);
+    let stop = commands.clone();
+    let output = tokio::spawn(async move {
+        let mut answer = String::new();
+        let mut truncated = false;
+        while let Some(event) = event_rx.recv().await {
+            if let UiEvent::AssistantDelta(delta) = event
+                && append_bounded(&mut answer, &delta, MAX_AGENT_RESULT_BYTES)
+                && !truncated
+            {
+                truncated = true;
+                let _ = stop.send(UiCommand::Quit).await;
+            }
+        }
+        (answer, truncated)
+    });
+    let result = run_turn(
+        codex,
+        tools,
+        &events,
+        &mut command_rx,
+        thread_id,
+        prompt,
+        None,
+    )
+    .await;
+    drop(events);
+    drop(commands);
+    let (answer, truncated) = output.await.context("join agent output collector")?;
+    if result? && !truncated {
+        bail!("agent turn quit unexpectedly");
+    }
+    Ok(answer)
+}
+
 async fn run_controller(
     events: mpsc::Sender<UiEvent>,
     mut commands: mpsc::Receiver<UiCommand>,
@@ -130,73 +225,81 @@ async fn run_controller(
         None
     };
     let mut tools = ToolHost {
-        kernel: Kernel::spawn().await?,
+        kernel: None,
         task_board: None,
         project: cwd.clone(),
+        agents: AgentManager::new(cwd.clone())?,
     };
     events.send(UiEvent::Ready(thread.is_some())).await?;
 
-    while let Some(command) = commands.recv().await {
-        match command {
-            UiCommand::Login => match login(&mut codex, &events, &mut commands).await? {
-                LoginOutcome::Complete => {
-                    events.send(UiEvent::Ready(false)).await?;
-                    account = codex.account(false).await?;
-                    send_account(&events, &account).await?;
-                    let models = codex.models().await?;
-                    let (next_model, efforts, selected_effort) = select_model(&models)?;
-                    model = next_model;
-                    events
-                        .send(UiEvent::ModelChanged {
-                            name: model.clone(),
-                            efforts,
-                            selected_effort,
-                        })
-                        .await?;
-                    thread = Some(codex.start_thread(&cwd, Some(&model)).await?);
-                    events.send(UiEvent::Ready(true)).await?;
-                    events
-                        .send(UiEvent::LoginFinished {
-                            success: true,
-                            error: None,
-                        })
-                        .await?;
+    let result: Result<()> = async {
+        while let Some(command) = commands.recv().await {
+            match command {
+                UiCommand::Login => match login(&mut codex, &events, &mut commands).await? {
+                    LoginOutcome::Complete => {
+                        events.send(UiEvent::Ready(false)).await?;
+                        account = codex.account(false).await?;
+                        send_account(&events, &account).await?;
+                        let models = codex.models().await?;
+                        let (next_model, efforts, selected_effort) = select_model(&models)?;
+                        model = next_model;
+                        events
+                            .send(UiEvent::ModelChanged {
+                                name: model.clone(),
+                                efforts,
+                                selected_effort,
+                            })
+                            .await?;
+                        thread = Some(codex.start_thread(&cwd, Some(&model)).await?);
+                        events.send(UiEvent::Ready(true)).await?;
+                        events
+                            .send(UiEvent::LoginFinished {
+                                success: true,
+                                error: None,
+                            })
+                            .await?;
+                    }
+                    LoginOutcome::Cancelled => {}
+                    LoginOutcome::Quit => break,
+                },
+                UiCommand::CancelLogin { login_id } => {
+                    codex.cancel_login(&login_id).await?;
                 }
-                LoginOutcome::Cancelled => {}
-                LoginOutcome::Quit => break,
-            },
-            UiCommand::CancelLogin { login_id } => {
-                codex.cancel_login(&login_id).await?;
-            }
-            UiCommand::Submit { text, effort } => {
-                let Some(thread_id) = thread.as_deref() else {
-                    events
-                        .send(UiEvent::Error("Sign in before sending a message.".into()))
-                        .await?;
-                    continue;
-                };
-                match run_turn(
-                    &mut codex,
-                    &mut tools,
-                    &events,
-                    &mut commands,
-                    thread_id,
-                    &text,
-                    effort.as_deref(),
-                )
-                .await
-                {
-                    Ok(true) => break,
-                    Ok(false) => {}
-                    Err(error) => events.send(UiEvent::Error(format!("{error:#}"))).await?,
+                UiCommand::Submit { text, effort } => {
+                    let Some(thread_id) = thread.as_deref() else {
+                        events
+                            .send(UiEvent::Error("Sign in before sending a message.".into()))
+                            .await?;
+                        continue;
+                    };
+                    match run_turn(
+                        &mut codex,
+                        &mut tools,
+                        &events,
+                        &mut commands,
+                        thread_id,
+                        &text,
+                        effort.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(error) => events.send(UiEvent::Error(format!("{error:#}"))).await?,
+                    }
                 }
+                UiCommand::Quit => break,
             }
-            UiCommand::Quit => break,
         }
+        Ok(())
     }
+    .await;
 
-    tools.kernel.shutdown().await?;
-    codex.shutdown().await
+    let tools_shutdown = tools.shutdown().await;
+    let codex_shutdown = codex.shutdown().await;
+    result?;
+    tools_shutdown?;
+    codex_shutdown
 }
 
 async fn login(
@@ -409,6 +512,12 @@ async fn execute_tool(
             namespace.as_deref().unwrap_or("")
         );
     }
+    if tool == "agents" {
+        return bounded_projection(
+            serde_json::to_string(&execute_agents(&host.agents, arguments).await?)?,
+            "Agent",
+        );
+    }
     if tool == "coordination" {
         if host.task_board.is_none() {
             host.task_board = Some(TaskBoard::open(&host.project)?);
@@ -431,7 +540,15 @@ async fn execute_tool(
         .get("code")
         .and_then(Value::as_str)
         .context("seraph.python requires a string code argument")?;
-    let output = host.kernel.execute(code).await?;
+    if host.kernel.is_none() {
+        host.kernel = Some(Kernel::spawn().await?);
+    }
+    let output = host
+        .kernel
+        .as_ref()
+        .expect("kernel was initialized")
+        .execute(code)
+        .await?;
     let projection = serde_json::to_string(&json!({
         "emitted": output.emitted,
         "stdout_bytes": output.stdout.len(),
@@ -441,6 +558,62 @@ async fn execute_tool(
         "truncated": output.truncated,
     }))?;
     bounded_projection(projection, "Python")
+}
+
+async fn execute_agents(manager: &AgentManager, arguments: &Value) -> Result<Value> {
+    match arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .context("seraph.agents requires a string action")?
+    {
+        "spawn" => {
+            let prompt = arguments
+                .get("prompt")
+                .and_then(Value::as_str)
+                .context("spawn requires a string prompt")?;
+            if prompt.len() > 16 * 1024 {
+                bail!("agent prompt exceeds 16 KiB");
+            }
+            manager.spawn(prompt).await
+        }
+        "list" => {
+            let after_id = arguments
+                .get("after_id")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .context("after_id must be a non-negative integer")
+                })
+                .transpose()?
+                .unwrap_or(0);
+            let limit = arguments
+                .get("limit")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|limit| (1..=200).contains(limit))
+                        .context("limit must be an integer from 1 to 200")
+                })
+                .transpose()?
+                .unwrap_or(50) as usize;
+            Ok(manager.list(after_id, limit).await)
+        }
+        "wait" => {
+            let ids = arguments
+                .get("ids")
+                .and_then(Value::as_array)
+                .context("wait requires an ids array")?
+                .iter()
+                .map(|id| {
+                    id.as_u64()
+                        .filter(|id| *id > 0)
+                        .context("agent IDs must be positive integers")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            manager.wait(&ids).await
+        }
+        action => bail!("unknown agent action {action:?}"),
+    }
 }
 
 fn bounded_projection(projection: String, source: &str) -> Result<String> {
@@ -513,10 +686,10 @@ fn execute_coordination(board: &mut TaskBoard, caller: &str, arguments: &Value) 
                 .unwrap_or(50) as usize;
             return board.list_json(ready_only, after_id, limit);
         }
-        "claim" => json!({
-            "claimed": board.claim(task_id(arguments)?, caller)?,
-            "owner": caller,
-        }),
+        "claim" => {
+            let (claimed, attempt_id) = board.claim(task_id(arguments)?, caller)?;
+            json!({ "claimed": claimed, "actor": caller, "attempt_id": attempt_id })
+        }
         "complete" => match board.complete(task_id(arguments)?, caller)? {
             Some((unblocked, truncated)) => json!({
                 "completed": true,
@@ -555,6 +728,16 @@ fn bounded_error(error: &anyhow::Error) -> String {
         text.truncate(end);
     }
     text
+}
+
+fn append_bounded(target: &mut String, text: &str, limit: usize) -> bool {
+    for character in text.chars() {
+        if target.len() + character.len_utf8() > limit {
+            return true;
+        }
+        target.push(character);
+    }
+    false
 }
 
 fn signed_in(account: &Value) -> bool {
