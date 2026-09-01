@@ -59,3 +59,12 @@ The authentication pane and its browser, manual fallback, device-code, and
 cancel states in `src/tui.rs` are adapted from Prime Agent's
 `login-dialog.ts`, `oauth-selector.ts`, and `auth-flows.ts` at commit
 `4e42fab2ce0c486cd6da0237b56b9b7787d06bfd` under the same MIT License.
+
+## OpenAI Codex apply-patch core
+
+`src/edit_patch.rs` derives its strict update parser, source-file line-ending
+model, and exact-match preflight vocabulary from OpenAI Codex apply-patch at
+commit `2c3bf4ea793aa5c590932553d242a287380e9cec`, copyright 2025 OpenAI,
+under the Apache License 2.0. Its copyright notice is in
+`LICENSES/CODEX-APACHE-2.0.txt`; the full license text is in
+`LICENSES/GROK-BUILD-APACHE-2.0.txt`.

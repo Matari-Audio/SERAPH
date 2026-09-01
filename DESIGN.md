@@ -137,7 +137,7 @@ The composer, shortcut panel, and temporary authentication pane use Ratatui’s 
 ### Shell Header
 
 - **Structure:** One terminal row with bold SERAPH and muted project name on the left.
-- **Agent Rail:** Connected main in green, then at most four compact agent IDs colored by status; excess agents collapse to `+N`.
+- **Agents Menu:** Connected main in green followed by `Agents N ▾`; `Ctrl+\\` opens a flat Grok-style menu with full-row keyboard selection for All agents, main, and every child.
 
 ### Transcript
 
@@ -155,7 +155,7 @@ The composer, shortcut panel, and temporary authentication pane use Ratatui’s 
 - **Task Rows:** Pair the task glyph and `#id` with a one-line subject; owner or `unclaimed` plus status aligns right. Active is violet `◆`, completed green `●`, failed red `●`, and other states amber `◇`.
 - **Focus:** Tab on an empty composer focuses the first visible dock item. Up/Down or `j`/`k` follows the shared visible-row order; overflow rows are not focus targets. The focused row uses Selection Charcoal.
 - **Activation:** Enter toggles a Subagents or Tasks header. Enter on a subagent row opens that child in the Prime-style All Agents view and shows `[↗]` while focused. Esc or Tab returns focus to the composer.
-- **Behavior:** Task state refreshes cross-process from shared SQLite without entering conversation context. Down or Ctrl+G still opens the Prime-style All Agents view directly.
+- **Behavior:** Task state refreshes cross-process from shared SQLite without entering conversation context. Down or Ctrl+G still opens the Prime-style All Agents view directly; the top Agents menu is an additional Grok entry point.
 
 ### Composer
 

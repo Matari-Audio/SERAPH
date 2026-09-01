@@ -33,9 +33,9 @@
     {
       "name": "Shell Header",
       "kind": "nav",
-      "description": "Project identity and the compact live agent rail.",
-      "html": "<div class=\"ds-shell-header\"><span><strong>SERAPH</strong>&nbsp;&nbsp;<span class=\"ds-shell-muted\">project</span></span><span><span class=\"ds-shell-green\">● main</span>&nbsp;&nbsp;<span class=\"ds-shell-violet\">⠋ a12</span>&nbsp;&nbsp;<span class=\"ds-shell-muted\">+2</span></span></div>",
-      "css": ".ds-shell-header { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #e1e1e1; font-family: monospace; white-space: nowrap; } .ds-shell-muted { color: #6c6c6c; } .ds-shell-green { color: #9ece6a; } .ds-shell-violet { color: #bb9af7; }"
+      "description": "Project identity and the keyboard-interactive Grok-style Agents menu.",
+      "html": "<div class=\"ds-shell-header\"><span><strong>SERAPH</strong>&nbsp;&nbsp;<span class=\"ds-shell-muted\">project</span></span><span><span class=\"ds-shell-green\">● main</span>&nbsp;&nbsp;<strong>Agents 3 ▾</strong></span></div>",
+      "css": ".ds-shell-header { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #e1e1e1; font-family: monospace; white-space: nowrap; } .ds-shell-header > span:last-child strong { color: #787878; } .ds-shell-muted { color: #6c6c6c; } .ds-shell-green { color: #9ece6a; }"
     },
     {
       "name": "Transcript Roles",
