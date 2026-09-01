@@ -7,16 +7,26 @@ mod pi_auth;
 mod tasks;
 mod tui;
 
-use std::{collections::BTreeMap, env, path::PathBuf, process::ExitCode, thread, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    env,
+    path::PathBuf,
+    process::ExitCode,
+    thread,
+    time::Duration,
+};
 
-use agents::AgentManager;
+use agents::{AgentManager, ChildCommand, ChildEvent};
 use anyhow::{Context, Result, bail};
 use codex::{Codex, CodexEvent, LoginEvent, ToolResult};
 use kernel::Kernel;
 use seraph::edit_patch::{AppliedPatch, apply_prepared_edits, prepare_exact_patch};
 use serde_json::{Value, json};
 use tasks::TaskBoard;
-use tokio::{io::AsyncReadExt, sync::mpsc};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    sync::mpsc,
+};
 use tui::{UiCommand, UiEvent};
 
 const MAX_TOOL_RESULT_BYTES: usize = 32 * 1024;
@@ -72,16 +82,7 @@ async fn run() -> Result<()> {
         if args.next().is_some() {
             bail!("internal agent accepts its prompt on stdin");
         }
-        let mut prompt = String::new();
-        tokio::io::stdin()
-            .take(16 * 1024 + 1)
-            .read_to_string(&mut prompt)
-            .await
-            .context("read internal agent prompt")?;
-        if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
-            bail!("internal agent prompt must contain 1 to 16384 bytes");
-        }
-        return run_headless_agent(&prompt).await;
+        return run_headless_agent().await;
     }
     if command != "exec" {
         bail!("usage: seraph [exec '<python cell>' ['<python cell>' ...]]");
@@ -139,7 +140,7 @@ async fn run_chat() -> Result<()> {
     }
 }
 
-async fn run_headless_agent(prompt: &str) -> Result<()> {
+async fn run_headless_agent() -> Result<()> {
     let project = env::current_dir().context("read current directory")?;
     let mut codex = Codex::spawn().await?;
     if !signed_in(&codex.account(false).await?) {
@@ -155,53 +156,365 @@ async fn run_headless_agent(prompt: &str) -> Result<()> {
         project: project.clone(),
         agents: AgentManager::new(project, None)?,
     };
-    let result = run_headless_turn(&mut codex, &mut tools, &thread_id, prompt).await;
+    let mut commands = BufReader::new(tokio::io::stdin()).lines();
+    let mut output = tokio::io::stdout();
+    write_child_event(&mut output, &ChildEvent::Ready).await?;
+    let initial = read_child_command(&mut commands)
+        .await?
+        .context("SERAPH agent control stream closed before start")?;
+    let ChildCommand::Start { prompt } = initial else {
+        bail!("first SERAPH agent command must be start");
+    };
+    validate_agent_prompt(&prompt)?;
+    let agent_id = env::var("SERAPH_AGENT_ID").context("SERAPH agent id missing")?;
+    let submission = codex
+        .queue_turn(
+            &thread_id,
+            &prompt,
+            &format!("seraph-agent-{agent_id}-initial"),
+        )
+        .await?;
+    let mut turn_id = Some(codex.start_queued_turn(&thread_id, &submission).await?);
+    write_child_event(
+        &mut output,
+        &ChildEvent::Running {
+            key: None,
+            result: None,
+        },
+    )
+    .await?;
+
+    let mut pending = VecDeque::new();
+    let mut answer = String::new();
+    let mut answer_truncated = false;
+    let mut turn_error = None;
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+    let mut shutting_down = false;
+    let mut turn_stopping = false;
+    let result: Result<()> = async {
+        loop {
+            let Some(active_turn) = turn_id.as_deref() else {
+                let command = read_child_command(&mut commands)
+                    .await?
+                    .context("SERAPH agent control stream closed")?;
+                match command {
+                    ChildCommand::FollowUp { key, prompt } => {
+                        validate_follow_up(&key, &prompt)?;
+                        let submission = codex
+                            .queue_turn(
+                                &thread_id,
+                                &prompt,
+                                &format!("seraph-agent-{agent_id}-{key}"),
+                            )
+                            .await?;
+                        write_child_event(
+                            &mut output,
+                            &ChildEvent::Queued {
+                                key: key.clone(),
+                                submission_id: submission.clone(),
+                                starts_immediately: true,
+                            },
+                        )
+                        .await?;
+                        turn_id = Some(codex.start_queued_turn(&thread_id, &submission).await?);
+                        deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+                        write_child_event(
+                            &mut output,
+                            &ChildEvent::Running {
+                                key: Some(key),
+                                result: None,
+                            },
+                        )
+                        .await?;
+                    }
+                    ChildCommand::Interrupt => {
+                        write_child_event(
+                            &mut output,
+                            &ChildEvent::Interrupted { accepted: false },
+                        )
+                        .await?;
+                    }
+                    ChildCommand::Shutdown => break,
+                    ChildCommand::Start { .. } => bail!("agent was already started"),
+                }
+                continue;
+            };
+
+            enum Next {
+                Event(Result<CodexEvent>),
+                Command(Result<Option<ChildCommand>>),
+                Timeout,
+            }
+            let next = {
+                let event = codex.next_turn_event(&thread_id, active_turn);
+                tokio::pin!(event);
+                tokio::select! {
+                    event = &mut event => Next::Event(event),
+                    command = read_child_command(&mut commands) => Next::Command(command),
+                    _ = tokio::time::sleep_until(deadline) => Next::Timeout,
+                }
+            };
+            match next {
+                Next::Command(Ok(Some(ChildCommand::FollowUp { key, prompt }))) => {
+                    validate_follow_up(&key, &prompt)?;
+                    let submission = codex
+                        .queue_turn(
+                            &thread_id,
+                            &prompt,
+                            &format!("seraph-agent-{agent_id}-{key}"),
+                        )
+                        .await?;
+                    pending.push_back((key.clone(), submission.clone()));
+                    write_child_event(
+                        &mut output,
+                        &ChildEvent::Queued {
+                            key,
+                            submission_id: submission,
+                            starts_immediately: false,
+                        },
+                    )
+                    .await?;
+                }
+                Next::Command(Ok(Some(ChildCommand::Interrupt))) => {
+                    let accepted = codex.interrupt_turn(&thread_id, active_turn).await?;
+                    turn_stopping = true;
+                    write_child_event(&mut output, &ChildEvent::Interrupted { accepted }).await?;
+                }
+                Next::Command(Ok(Some(ChildCommand::Shutdown))) => {
+                    shutting_down = true;
+                    let _ = codex.interrupt_turn(&thread_id, active_turn).await?;
+                    turn_stopping = true;
+                }
+                Next::Command(Ok(Some(ChildCommand::Start { .. }))) => {
+                    bail!("agent was already started")
+                }
+                Next::Command(Ok(None)) => {
+                    shutting_down = true;
+                    let _ = codex.interrupt_turn(&thread_id, active_turn).await?;
+                    turn_stopping = true;
+                }
+                Next::Command(Err(error)) | Next::Event(Err(error)) => return Err(error),
+                Next::Timeout => {
+                    let accepted = codex.interrupt_turn(&thread_id, active_turn).await?;
+                    turn_stopping = true;
+                    write_child_event(&mut output, &ChildEvent::Interrupted { accepted }).await?;
+                    deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+                }
+                Next::Event(Ok(CodexEvent::AgentMessageDelta(delta))) => {
+                    if !answer_truncated
+                        && append_bounded(&mut answer, &delta, MAX_AGENT_RESULT_BYTES)
+                    {
+                        answer_truncated = true;
+                        let _ = codex.interrupt_turn(&thread_id, active_turn).await?;
+                        turn_stopping = true;
+                    }
+                }
+                Next::Event(Ok(CodexEvent::ToolCall(call))) => {
+                    if turn_stopping {
+                        codex
+                            .respond_tool(
+                                call,
+                                ToolResult {
+                                    text: "Turn interrupted before tool execution.".into(),
+                                    success: false,
+                                },
+                            )
+                            .await?;
+                        continue;
+                    }
+                    enum ToolOutcome {
+                        Complete(Result<String>),
+                        Interrupted {
+                            reason: &'static str,
+                            acknowledge: bool,
+                        },
+                    }
+                    let result = {
+                        let execution = execute_tool(
+                            &mut tools,
+                            &call.thread_id,
+                            &call.namespace,
+                            &call.tool,
+                            &call.arguments,
+                        );
+                        tokio::pin!(execution);
+                        loop {
+                            tokio::select! {
+                                result = &mut execution => break ToolOutcome::Complete(result),
+                                command = read_child_command(&mut commands) => match command? {
+                                    Some(ChildCommand::FollowUp { key, prompt }) => {
+                                        validate_follow_up(&key, &prompt)?;
+                                        let submission = codex
+                                            .queue_turn(
+                                                &thread_id,
+                                                &prompt,
+                                                &format!("seraph-agent-{agent_id}-{key}"),
+                                            )
+                                            .await?;
+                                        pending.push_back((key.clone(), submission.clone()));
+                                        write_child_event(
+                                            &mut output,
+                                            &ChildEvent::Queued {
+                                                key,
+                                                submission_id: submission,
+                                                starts_immediately: false,
+                                            },
+                                        )
+                                        .await?;
+                                    }
+                                    Some(ChildCommand::Interrupt) => {
+                                        break ToolOutcome::Interrupted {
+                                            reason: "Turn interrupted before tool execution completed.",
+                                            acknowledge: true,
+                                        };
+                                    }
+                                    Some(ChildCommand::Shutdown) | None => {
+                                        shutting_down = true;
+                                        break ToolOutcome::Interrupted {
+                                            reason: "Turn shut down before tool execution completed.",
+                                            acknowledge: false,
+                                        };
+                                    }
+                                    Some(ChildCommand::Start { .. }) => {
+                                        bail!("agent was already started")
+                                    }
+                                },
+                                _ = tokio::time::sleep_until(deadline) => {
+                                    deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+                                    break ToolOutcome::Interrupted {
+                                        reason: "Tool execution timed out and the turn was interrupted.",
+                                        acknowledge: true,
+                                    };
+                                }
+                            }
+                        }
+                    };
+                    let interrupt = match &result {
+                        ToolOutcome::Interrupted { acknowledge, .. } => Some(*acknowledge),
+                        ToolOutcome::Complete(_) => None,
+                    };
+                    codex
+                        .respond_tool(
+                            call,
+                            match result {
+                                ToolOutcome::Complete(Ok(text)) => ToolResult {
+                                    text,
+                                    success: true,
+                                },
+                                ToolOutcome::Complete(Err(error)) => ToolResult {
+                                    text: bounded_error(&error),
+                                    success: false,
+                                },
+                                ToolOutcome::Interrupted { reason, .. } => ToolResult {
+                                    text: reason.into(),
+                                    success: false,
+                                },
+                            },
+                        )
+                        .await?;
+                    if let Some(acknowledge) = interrupt {
+                        let accepted = codex.interrupt_turn(&thread_id, active_turn).await?;
+                        turn_stopping = true;
+                        if acknowledge {
+                            write_child_event(
+                                &mut output,
+                                &ChildEvent::Interrupted { accepted },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Next::Event(Ok(CodexEvent::TurnError(error))) => turn_error = Some(error),
+                Next::Event(Ok(CodexEvent::TurnCompleted(turn))) => {
+                    match turn.get("status").and_then(Value::as_str) {
+                        Some("completed" | "interrupted") => {}
+                        Some("failed") => bail!(
+                            "Codex turn failed: {}",
+                            turn.get("error")
+                                .map(Value::to_string)
+                                .or(turn_error.take())
+                                .unwrap_or_else(|| "unknown error".into())
+                        ),
+                        status => bail!("Codex turn ended with unexpected status {status:?}"),
+                    }
+                    let result = std::mem::take(&mut answer);
+                    answer_truncated = false;
+                    turn_error = None;
+                    turn_id = None;
+                    turn_stopping = false;
+                    if shutting_down {
+                        write_child_event(&mut output, &ChildEvent::Idle { result }).await?;
+                        break;
+                    }
+                    if let Some((key, submission)) = pending.pop_front() {
+                        turn_id = Some(codex.start_queued_turn(&thread_id, &submission).await?);
+                        deadline = tokio::time::Instant::now() + Duration::from_secs(10 * 60);
+                        write_child_event(
+                            &mut output,
+                            &ChildEvent::Running {
+                                key: Some(key),
+                                result: Some(result),
+                            },
+                        )
+                        .await?;
+                    } else {
+                        write_child_event(&mut output, &ChildEvent::Idle { result }).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = &result {
+        write_child_event(
+            &mut output,
+            &ChildEvent::Failed {
+                error: bounded_error(error),
+            },
+        )
+        .await?;
+    }
     tools.shutdown().await?;
     codex.shutdown().await?;
-    print!("{}", result?);
+    result?;
+    write_child_event(&mut output, &ChildEvent::Stopped).await
+}
+
+async fn read_child_command(
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) -> Result<Option<ChildCommand>> {
+    lines
+        .next_line()
+        .await
+        .context("read SERAPH child command")?
+        .map(|line| serde_json::from_str(&line).context("decode SERAPH child command JSON"))
+        .transpose()
+}
+
+async fn write_child_event(output: &mut tokio::io::Stdout, event: &ChildEvent) -> Result<()> {
+    let mut line = serde_json::to_vec(event)?;
+    line.push(b'\n');
+    output
+        .write_all(&line)
+        .await
+        .context("write SERAPH child event")?;
+    output.flush().await.context("flush SERAPH child event")
+}
+
+fn validate_agent_prompt(prompt: &str) -> Result<()> {
+    if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
+        bail!("agent prompt must contain 1 to 16384 bytes");
+    }
     Ok(())
 }
 
-async fn run_headless_turn(
-    codex: &mut Codex,
-    tools: &mut ToolHost,
-    thread_id: &str,
-    prompt: &str,
-) -> Result<String> {
-    let (events, mut event_rx) = mpsc::channel(64);
-    let (commands, mut command_rx) = mpsc::channel(1);
-    let stop = commands.clone();
-    let output = tokio::spawn(async move {
-        let mut answer = String::new();
-        let mut truncated = false;
-        while let Some(event) = event_rx.recv().await {
-            if let UiEvent::AssistantDelta(delta) = event
-                && append_bounded(&mut answer, &delta, MAX_AGENT_RESULT_BYTES)
-                && !truncated
-            {
-                truncated = true;
-                let _ = stop.send(UiCommand::Quit).await;
-            }
-        }
-        (answer, truncated)
-    });
-    let result = run_turn(
-        codex,
-        tools,
-        &events,
-        &mut command_rx,
-        thread_id,
-        prompt,
-        None,
-    )
-    .await;
-    drop(events);
-    drop(commands);
-    let (answer, truncated) = output.await.context("join agent output collector")?;
-    if result? && !truncated {
-        bail!("agent turn quit unexpectedly");
+fn validate_follow_up(key: &str, prompt: &str) -> Result<()> {
+    validate_agent_prompt(prompt)?;
+    if key.trim().is_empty() || key.len() > 128 {
+        bail!("follow-up key must contain 1 to 128 bytes");
     }
-    Ok(answer)
+    Ok(())
 }
 
 async fn run_controller(
@@ -792,6 +1105,22 @@ async fn execute_agents(manager: &AgentManager, arguments: &Value) -> Result<Val
                 .filter(|id| *id > 0)
                 .context("interrupt requires a positive integer id")?;
             Ok(json!({ "id": id, "interrupted": manager.interrupt(id).await? }))
+        }
+        "follow_up" => {
+            let id = arguments
+                .get("id")
+                .and_then(Value::as_u64)
+                .filter(|id| *id > 0)
+                .context("follow_up requires a positive integer id")?;
+            let prompt = arguments
+                .get("prompt")
+                .and_then(Value::as_str)
+                .context("follow_up requires a string prompt")?;
+            let key = arguments
+                .get("key")
+                .and_then(Value::as_str)
+                .context("follow_up requires a string idempotency key")?;
+            manager.follow_up(id, prompt, key).await
         }
         "send" => {
             let recipient = arguments
