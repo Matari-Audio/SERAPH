@@ -177,6 +177,31 @@ impl Codex {
                         "required": ["action"],
                         "additionalProperties": false
                     }
+                }, {
+                    "type": "function",
+                    "name": "agents",
+                    "description": "Spawn and join SERAPH-native agents with shared project state",
+                    "deferLoading": true,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["spawn", "list", "wait"]
+                            },
+                            "prompt": { "type": "string", "maxLength": 16384 },
+                            "ids": {
+                                "type": "array",
+                                "items": { "type": "integer", "minimum": 1 },
+                                "uniqueItems": true,
+                                "maxItems": 8
+                            },
+                            "after_id": { "type": "integer", "minimum": 0 },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+                        },
+                        "required": ["action"],
+                        "additionalProperties": false
+                    }
                 }]
             }]
         });
