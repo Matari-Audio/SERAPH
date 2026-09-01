@@ -3,6 +3,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
 use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
@@ -52,6 +53,43 @@ fn ensure_peek_viewport_lifecycle(
     } else {
         state.restore_peek_viewport(agents);
     }
+}
+
+/// Keep each parent and its subagents atomic while placing the primary conversation first,
+/// followed by the remaining current-project agents and then sessions from other projects.
+pub(crate) fn arrange_project_rows(
+    rows: Vec<DashboardRow>,
+    current_cwd: &Path,
+) -> Vec<DashboardRow> {
+    let mut primary = None;
+    let mut current = Vec::new();
+    let mut other = Vec::new();
+    let mut rows = rows.into_iter().peekable();
+
+    while let Some(parent) = rows.next() {
+        let is_primary = parent.id == DashboardRowId::TopLevel(AgentId(0));
+        let is_current = is_primary || parent.cwd == current_cwd;
+        let mut cluster = vec![parent];
+        while rows.peek().is_some_and(|row| row.indent > 0) {
+            if let Some(child) = rows.next() {
+                cluster.push(child);
+            }
+        }
+        if is_primary {
+            primary = Some(cluster);
+        } else if is_current {
+            current.push(cluster);
+        } else {
+            other.push(cluster);
+        }
+    }
+
+    primary
+        .into_iter()
+        .chain(current)
+        .chain(other)
+        .flatten()
+        .collect()
 }
 
 // The thin left bar marking the selected row is `crate::glyphs::selection_bar()`, with a `│` fallback on legacy CP437 consoles
@@ -130,6 +168,7 @@ pub fn render_dashboard(
             roster,
         )
     };
+    let rows = arrange_project_rows(rows, &state.cwd);
     // Chat-conversation roster rows can't be deleted from the dashboard yet; record them so the `[✗]` button and the Ctrl+X arm both skip them
     state.conversation_row_ids = if workspace_dashboard_enabled {
         Default::default()
@@ -263,16 +302,17 @@ pub fn render_dashboard(
     render_header(buf, layout.header, &theme, &rows, state, upgrade_cta);
 
     // Body: key off visible rows (local agents and roster), not the local map alone
-    if rows.is_empty() {
-        if state.filter.is_active() {
-            render_no_match(buf, layout.list, &theme, &state.filter);
-        } else {
-            render_empty_state(buf, layout.list, &theme, dashboard_sessions_loading);
-        }
-    } else if area.width < MIN_DASHBOARD_WIDTH {
-        render_narrow_rows(buf, layout.list, &theme, &rows, state);
+    if rows.is_empty() && state.filter.is_active() {
+        render_no_match(buf, layout.list, &theme, &state.filter);
     } else {
-        render_rows(buf, layout.list, &theme, &rows, state);
+        render_roster_rows(
+            buf,
+            layout.list,
+            &theme,
+            &rows,
+            state,
+            dashboard_sessions_loading,
+        );
     }
 
     // Compute the contextual placeholder hint and footer mode once here so both sub-renderers stay pure functions of the selected-row state
@@ -609,11 +649,7 @@ fn render_dashboard_banner(
         return;
     }
 
-    if inner.width < MIN_DASHBOARD_WIDTH {
-        render_narrow_rows(buf, inner, theme, rows, state);
-    } else {
-        render_rows(buf, inner, theme, rows, state);
-    }
+    render_roster_rows(buf, inner, theme, rows, state, false);
 }
 
 /// Render the dashboard header row:
@@ -1185,6 +1221,23 @@ fn build_dashboard_lines<'a>(
     let groups_on = matches!(grouping, Grouping::State);
     let emit_state_headers = groups_on && !matches!(filter, Filter::State(_));
 
+    // The main conversation is the stable lead cluster in the Current project region.
+    // Keep it ahead of Grok's pinned/lifecycle sections without changing those sections'
+    // contiguity, counts, collapse keys, or ordering.
+    let mut primary_end = 0usize;
+    if rows
+        .first()
+        .is_some_and(|row| row.id == DashboardRowId::TopLevel(AgentId(0)))
+    {
+        primary_end = 1;
+        while primary_end < rows.len() && rows[primary_end].indent != 0 {
+            primary_end += 1;
+        }
+    }
+    let mut out: Vec<DashboardLine<'a>> = Vec::with_capacity(rows.len() + 6);
+    out.extend(rows[..primary_end].iter().map(DashboardLine::Row));
+    let rows = &rows[primary_end..];
+
     // Pinned top-level agents are sorted to the front (see `sort_rows`), so they form a contiguous prefix of clusters
     // Split that prefix off as a dedicated "Pinned" section above the state / directory groups
     // That way a pinned (say) idle agent reads as pinned rather than landing under an "Idle" header
@@ -1203,7 +1256,6 @@ fn build_dashboard_lines<'a>(
         }
     }
 
-    let mut out: Vec<DashboardLine<'a>> = Vec::with_capacity(rows.len() + 6);
     if pinned_count > 0 {
         // Grouping ON gets a labelled "Pinned N" header above the block
         // Grouping OFF (Ctrl+G) gets no header; a textless divider separates the pinned block from the rest (only when there's a rest to separate)
@@ -1361,6 +1413,36 @@ pub(crate) fn focusables(
     .collect()
 }
 
+/// Display-order cursor targets for the split Prime-style roster.
+pub(crate) fn focusables_for_roster(
+    rows: &[DashboardRow],
+    current_cwd: &Path,
+    grouping: Grouping,
+    filter: &Filter,
+    collapsed: &std::collections::HashSet<SectionKey>,
+    idle_show_all: bool,
+    search_active: bool,
+) -> Vec<Focusable> {
+    let split = project_split(rows, current_cwd);
+    let mut result = focusables(
+        &rows[..split],
+        grouping,
+        filter,
+        collapsed,
+        idle_show_all,
+        search_active,
+    );
+    result.extend(focusables(
+        &rows[split..],
+        Grouping::Directory,
+        filter,
+        collapsed,
+        idle_show_all,
+        search_active,
+    ));
+    result
+}
+
 /// The section header that owns `row_id` under the current grouping and filter.
 /// `None` when no headers are emitted (directory grouping, `s:state` filter) or the row isn't present in `rows` at all.
 /// Walks the same [`build_dashboard_lines`] the renderer paints but with an EMPTY collapsed set.
@@ -1388,12 +1470,35 @@ pub(crate) fn section_of_row(
     None
 }
 
-fn render_rows(
+/// Resolve collapse ownership only inside the Current project region; Other projects is flat.
+pub(crate) fn section_of_row_for_roster(
+    rows: &[DashboardRow],
+    current_cwd: &Path,
+    grouping: Grouping,
+    filter: &Filter,
+    row_id: &super::DashboardRowId,
+) -> Option<SectionKey> {
+    let split = project_split(rows, current_cwd);
+    section_of_row(&rows[..split], grouping, filter, row_id)
+}
+
+fn project_split(rows: &[DashboardRow], current_cwd: &Path) -> usize {
+    rows.iter()
+        .position(|row| {
+            row.indent == 0
+                && row.id != DashboardRowId::TopLevel(AgentId(0))
+                && row.cwd != current_cwd
+        })
+        .unwrap_or(rows.len())
+}
+
+fn render_roster_rows(
     buf: &mut Buffer,
     area: Rect,
     theme: &Theme,
     rows: &[DashboardRow],
     state: &mut DashboardState,
+    sessions_loading: bool,
 ) {
     state.row_rects.clear();
     state.row_delete_rects.clear();
@@ -1403,12 +1508,148 @@ fn render_rows(
         return;
     }
 
+    let split = project_split(rows, &state.cwd);
+    let (current, other) = rows.split_at(split);
+    let current_h = if area.height < 2 {
+        area.height
+    } else {
+        ((u32::from(area.height) * 52).div_ceil(100)) as u16
+    }
+    .clamp(1, area.height.max(1));
+    let current_area = Rect::new(area.x, area.y, area.width, current_h);
+    let other_area = Rect::new(
+        area.x,
+        area.y.saturating_add(current_h),
+        area.width,
+        area.height.saturating_sub(current_h),
+    );
+
+    render_project_region(
+        buf,
+        current_area,
+        theme,
+        "Current project",
+        current,
+        state.grouping,
+        if sessions_loading && rows.is_empty() {
+            "Loading sessions…"
+        } else {
+            "No agents in this project"
+        },
+        state,
+    );
+    render_project_region(
+        buf,
+        other_area,
+        theme,
+        "Other projects",
+        other,
+        Grouping::Directory,
+        "No other project sessions",
+        state,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_project_region(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    label: &str,
+    rows: &[DashboardRow],
+    grouping: Grouping,
+    empty_message: &str,
+    state: &mut DashboardState,
+) {
+    if area.area() == 0 {
+        return;
+    }
+    let count = rows.iter().filter(|row| row.indent == 0).count();
+    render_project_header(
+        buf,
+        Rect::new(area.x, area.y, area.width, 1),
+        theme,
+        label,
+        count,
+    );
+    let body = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    if body.area() == 0 {
+        return;
+    }
+    if rows.is_empty() {
+        buf.set_string(
+            body.x.saturating_add(2),
+            body.y,
+            truncate_str(empty_message, body.width.saturating_sub(2) as usize),
+            Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+        );
+        return;
+    }
+    let tracks_viewport = state
+        .selected
+        .as_ref()
+        .is_some_and(|selected| rows.iter().any(|row| row.id == *selected));
+    if body.width < MIN_DASHBOARD_WIDTH {
+        render_narrow_rows(buf, body, theme, rows, state, grouping, tracks_viewport);
+    } else {
+        render_rows(buf, body, theme, rows, state, grouping, tracks_viewport);
+    }
+}
+
+fn render_project_header(buf: &mut Buffer, rect: Rect, theme: &Theme, label: &str, count: usize) {
+    if rect.area() == 0 {
+        return;
+    }
+    let title = format!("{label} {count}");
+    let title = truncate_str(&title, rect.width as usize);
+    buf.set_string(
+        rect.x,
+        rect.y,
+        &title,
+        Style::default()
+            .fg(theme.text_primary)
+            .bg(theme.bg_base)
+            .add_modifier(Modifier::BOLD),
+    );
+    let title_w = UnicodeWidthStr::width(title.as_str()) as u16;
+    let rule_x = rect.x.saturating_add(title_w).saturating_add(1);
+    let rule_w = (rect.x + rect.width).saturating_sub(rule_x);
+    if rule_w > 0 {
+        buf.set_string(
+            rule_x,
+            rect.y,
+            "─".repeat(rule_w as usize),
+            Style::default()
+                .fg(theme.selection_border)
+                .bg(theme.bg_base),
+        );
+    }
+}
+
+fn render_rows(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    rows: &[DashboardRow],
+    state: &mut DashboardState,
+    grouping: Grouping,
+    tracks_viewport: bool,
+) {
+    if area.area() == 0 {
+        return;
+    }
+
     // Rows are 3 visual cells tall (title, secondary, padding) and headers are 2 cells tall (label, gap)
     // Viewport scrolling works on cumulative cell offsets so partial rows can't peek out at the top or bottom of the list
     // The clamp helper still treats one unit as one cell; we just pass cell offsets instead of line indices
     let lines = build_dashboard_lines(
         rows,
-        state.grouping,
+        grouping,
         &state.filter,
         &state.collapsed_sections,
         state.idle_show_all,
@@ -1453,6 +1694,10 @@ fn render_rows(
     }
     let viewport_h = area.height as usize;
     let snap_target = selected_cell.map(|(top, h)| top + (h as usize).saturating_sub(1));
+    let saved_offset = state.viewport_offset;
+    if !tracks_viewport {
+        state.viewport_offset = 0;
+    }
     let offset = state.clamp_viewport(snap_target, viewport_h, total_cells);
     // Bias the offset up if the selection's TOP cell ended up above the visible window
     // The clamp only guarantees the bottom edge of the selection is in range when snap_target was used
@@ -1603,6 +1848,9 @@ fn render_rows(
 
     if needs_scrollbar {
         render_scrollbar(buf, area, offset, viewport_h, total_cells, theme);
+    }
+    if !tracks_viewport {
+        state.viewport_offset = saved_offset;
     }
 }
 
@@ -2274,11 +2522,9 @@ fn render_narrow_rows(
     theme: &Theme,
     rows: &[DashboardRow],
     state: &mut DashboardState,
+    grouping: Grouping,
+    tracks_viewport: bool,
 ) {
-    state.row_rects.clear();
-    state.row_delete_rects.clear();
-    state.section_rects.clear();
-    state.idle_overflow_rect = None;
     if area.area() == 0 {
         return;
     }
@@ -2287,7 +2533,7 @@ fn render_narrow_rows(
     // We still emit group headers and the selection marker so the visual vocabulary stays consistent
     let lines = build_dashboard_lines(
         rows,
-        state.grouping,
+        grouping,
         &state.filter,
         &state.collapsed_sections,
         state.idle_show_all,
@@ -2305,6 +2551,10 @@ fn render_narrow_rows(
         DashboardLine::IdleOverflow { .. } => state.selected_idle_overflow,
         DashboardLine::Divider => false,
     });
+    let saved_offset = state.viewport_offset;
+    if !tracks_viewport {
+        state.viewport_offset = 0;
+    }
     let offset = state.clamp_viewport(selected_line_idx, viewport_h, lines.len());
 
     let needs_scrollbar = lines.len() > viewport_h && area.width >= 4;
@@ -2475,6 +2725,9 @@ fn render_narrow_rows(
     if needs_scrollbar {
         render_scrollbar(buf, area, offset, viewport_h, lines.len(), theme);
     }
+    if !tracks_viewport {
+        state.viewport_offset = saved_offset;
+    }
 }
 
 /// Rendered when agents exist but the filter has hidden every row.
@@ -2495,28 +2748,6 @@ fn render_no_match(buf: &mut Buffer, area: Rect, theme: &Theme, filter: &Filter)
     let truncated = truncate_str(&hint, area.width.saturating_sub(2) as usize);
     // Explicit offset to avoid `area.y + 1.min(...)` precedence ambiguity
     // Drop one row of padding when the area can accommodate it; otherwise stay at the top
-    let y_offset: u16 = if area.height >= 2 { 1 } else { 0 };
-    buf.set_string(
-        area.x + 1,
-        area.y + y_offset,
-        truncated,
-        Style::default().fg(theme.gray),
-    );
-}
-
-fn render_empty_state(buf: &mut Buffer, area: Rect, theme: &Theme, loading: bool) {
-    if area.area() == 0 {
-        return;
-    }
-    // A single dim line: the dispatch input below is the call to action, so no multi-line onboarding is needed (but never render a blank screen)
-    // While the local session roster is being fetched we show a loading hint so a fresh open doesn't flash the "no agents" copy before rows land
-    let line = if loading {
-        "Loading sessions…"
-    } else {
-        "No agents yet, type a prompt to start one."
-    };
-    let truncated = truncate_str(line, area.width.saturating_sub(2) as usize);
-    // See `render_no_match` for the precedence rationale.
     let y_offset: u16 = if area.height >= 2 { 1 } else { 0 };
     buf.set_string(
         area.x + 1,

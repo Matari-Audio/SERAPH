@@ -3972,8 +3972,9 @@ impl DashboardState {
         // headers, and row churn (the last Working agent going idle) removes the header outright
         // Re-derive the focusable set the renderer is about to paint and, when the cursor's header is gone, move it to the `[+ New Agent]` button
         // (mirroring `toggle_grouping`) so the footer hints and the Right/Left/Enter collapse keys never act on an invisible section
-        let focusables = super::render::focusables(
+        let focusables = super::render::focusables_for_roster(
             rows,
+            &self.cwd,
             self.grouping,
             &self.filter,
             &self.collapsed_sections,
@@ -4009,8 +4010,13 @@ impl DashboardState {
                 .iter()
                 .any(|f| matches!(f, Focusable::Row(id) if *id == sel));
             if !visible
-                && let Some(key) =
-                    super::render::section_of_row(rows, self.grouping, &self.filter, &sel)
+                && let Some(key) = super::render::section_of_row_for_roster(
+                    rows,
+                    &self.cwd,
+                    self.grouping,
+                    &self.filter,
+                    &sel,
+                )
             {
                 self.focus_section(key);
             }
