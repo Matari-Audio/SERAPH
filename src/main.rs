@@ -708,6 +708,14 @@ async fn execute_agents(manager: &AgentManager, arguments: &Value) -> Result<Val
                 .collect::<Result<Vec<_>>>()?;
             manager.wait(&ids).await
         }
+        "interrupt" => {
+            let id = arguments
+                .get("id")
+                .and_then(Value::as_u64)
+                .filter(|id| *id > 0)
+                .context("interrupt requires a positive integer id")?;
+            Ok(json!({ "id": id, "interrupted": manager.interrupt(id).await? }))
+        }
         action => bail!("unknown agent action {action:?}"),
     }
 }

@@ -221,8 +221,9 @@ impl Codex {
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["spawn", "list", "wait"]
+                                "enum": ["spawn", "list", "wait", "interrupt"]
                             },
+                            "id": { "type": "integer", "minimum": 1 },
                             "prompt": { "type": "string", "maxLength": 16384 },
                             "ids": {
                                 "type": "array",

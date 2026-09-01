@@ -239,6 +239,20 @@ impl AgentManager {
         }
     }
 
+    pub async fn interrupt(&self, id: u64) -> Result<bool> {
+        let stop = {
+            let mut records = self.inner.records.lock().await;
+            let record = records
+                .get_mut(&id)
+                .with_context(|| format!("agent {id} not found"))?;
+            if record.is_finished() {
+                return Ok(false);
+            }
+            record.stop.take()
+        };
+        Ok(stop.is_some_and(|stop| stop.send(()).is_ok()))
+    }
+
     pub async fn shutdown(&self) {
         let (stops, tasks): (Vec<_>, Vec<_>) = {
             let mut records = self.inner.records.lock().await;
