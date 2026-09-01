@@ -15,6 +15,7 @@
       "failure-red": { "role": "tertiary", "displayName": "Failure Red" },
       "idle-amber": { "role": "tertiary", "displayName": "Idle Amber" },
       "model-teal": { "role": "secondary", "displayName": "Model Teal" },
+      "border-idle": { "role": "neutral", "displayName": "Idle Composer Border" },
       "border": { "role": "neutral", "displayName": "Composer Border" },
       "divider": { "role": "neutral", "displayName": "Footer Divider" }
     },
@@ -57,7 +58,7 @@
       "refersTo": "composer",
       "description": "The shell's sole persistent enclosure and primary input.",
       "html": "<label class=\"ds-composer\"><span class=\"ds-composer-title\"> ❯ </span><textarea aria-label=\"Ask SERAPH\" placeholder=\"Ask SERAPH…\"></textarea></label>",
-      "css": ".ds-composer { position: relative; display: block; height: 3em; border: 1px solid #505058; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-composer-title { position: absolute; top: -0.65em; left: 1ch; padding: 0 0.5ch; background: #141414; color: #7aa2f7; font-weight: 700; } .ds-composer textarea { width: calc(100% - 2ch); height: calc(100% - 1em); margin: 0.5em 1ch; border: 0; outline: 0; resize: none; background: transparent; color: #e1e1e1; font: inherit; } .ds-composer textarea::placeholder { color: #6c6c6c; } .ds-composer:focus-within { border-color: #505058; }"
+      "css": ".ds-composer { position: relative; display: block; height: 3em; border: 1px solid #323237; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-composer-title { position: absolute; top: -0.65em; left: 1ch; padding: 0 0.5ch; background: #141414; color: #7aa2f7; font-weight: 700; } .ds-composer textarea { width: calc(100% - 2ch); height: calc(100% - 1em); margin: 0.5em 1ch; border: 0; outline: 0; resize: none; background: transparent; color: #e1e1e1; font: inherit; } .ds-composer textarea::placeholder { color: #6c6c6c; } .ds-composer:focus-within { border-color: #505058; }"
     },
     {
       "name": "Status Footer",
