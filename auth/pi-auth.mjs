@@ -74,7 +74,8 @@ function models(id, provider = codexProvider) {
 
 function startLogin(id, provider, authType) {
   if (login) return send({ id, error: "Login already in progress" });
-  if (!runtime.getProvider(provider)?.auth?.[authType]) {
+  const auth = runtime.getProvider(provider)?.auth;
+  if (!(authType === "oauth" ? auth?.oauth : authType === "api_key" ? auth?.apiKey : undefined)) {
     return send({ id, error: `Unsupported login: ${provider}/${authType}` });
   }
   const controller = new AbortController();

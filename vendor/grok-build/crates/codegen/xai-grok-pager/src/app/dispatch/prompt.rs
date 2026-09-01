@@ -471,6 +471,10 @@ pub(super) fn dispatch_send_prompt_inner(
     agent.ephemeral_tip.clear_on_submit();
 
     let trimmed = text.trim();
+    let normalized_login = trimmed.strip_prefix("#login").and_then(|args| {
+        (args.is_empty() || args.starts_with(char::is_whitespace)).then(|| format!("/login{args}"))
+    });
+    let trimmed = normalized_login.as_deref().unwrap_or(trimmed);
 
     // Recorded before the registry runs, because most command outcomes return on their own path.
     let recorded_as_command = !literal && consume_input && trimmed.starts_with('/');
