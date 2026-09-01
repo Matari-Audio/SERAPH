@@ -1884,6 +1884,7 @@ impl AgentView {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
                     "model" | "m" => "Pick model",
                     "theme" | "t" => "Pick theme",
+                    "login" => "Pick login provider",
                     _ => "Pick option",
                 };
                 let picker_entries: Vec<PickerEntry> = items

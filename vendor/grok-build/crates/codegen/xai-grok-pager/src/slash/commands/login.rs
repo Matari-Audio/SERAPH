@@ -10,7 +10,12 @@ impl SlashCommand for LoginCommand {
         usage: "/login",
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::Login)
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        let method = args.trim();
+        if method.is_empty() {
+            CommandResult::Action(Action::Login)
+        } else {
+            CommandResult::Action(Action::LoginWithMethod(method.to_owned().into()))
+        }
     }
 }

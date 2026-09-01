@@ -1,6 +1,6 @@
 //! Login, logout, account switching, and auth-code submission dispatchers.
 
-use super::ctx::{restore_auth_return_view, show_welcome};
+use super::ctx::{get_active_agent_mut, restore_auth_return_view, show_welcome};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::router::dispatch;
 use super::session::lifecycle::{clear_startup_actions, drain_startup_actions};
@@ -216,6 +216,34 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
 /// A mid-session invocation therefore stashes the caller's view in `auth_return_view` and switches to `Welcome` so the flow is visible.
 /// The prior view is restored once auth completes or is cancelled.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
+    if matches!(app.auth_state, AuthState::Done) {
+        let items = app
+            .auth_methods
+            .iter()
+            .filter(|method| method.id().0.starts_with("seraph.pi:"))
+            .map(|method| crate::slash::command::ArgItem {
+                display: method.name().to_owned(),
+                match_text: method.name().to_owned(),
+                insert_text: method.id().0.to_string(),
+                description: method.description().unwrap_or_default().to_owned(),
+            })
+            .collect::<Vec<_>>();
+        if !items.is_empty()
+            && let Some(agent) = get_active_agent_mut(app)
+        {
+            agent.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
+                command: "login".to_owned(),
+                args_query: String::new(),
+                original_items: items.clone(),
+                items,
+                state: crate::views::picker::PickerState::input_active(),
+                previous_palette: None,
+                window: crate::views::modal_window::ModalWindowState::new(),
+            });
+            return vec![];
+        }
+    }
+
     ensure_login_method(app);
     let Some(method_id) = app.login_method_id.clone() else {
         app.auth_state = AuthState::Pending {
@@ -224,6 +252,27 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
 
+    start_login(app, method_id)
+}
+
+pub(super) fn dispatch_login_with_method(
+    app: &mut AppView,
+    method_id: agent_client_protocol::AuthMethodId,
+) -> Vec<Effect> {
+    let Some(method) = app
+        .auth_methods
+        .iter()
+        .find(|method| method.id() == &method_id)
+    else {
+        app.show_toast("That login method is no longer available");
+        return vec![];
+    };
+    app.login_label = Some(method.name().to_owned());
+    app.auth_start_mode = AuthMode::Pending;
+    start_login(app, method_id)
+}
+
+fn start_login(app: &mut AppView, method_id: agent_client_protocol::AuthMethodId) -> Vec<Effect> {
     // Show the auth UI when triggered from inside a session
     // `show_welcome` resets ephemeral state here, covering the AuthComplete / cancel-login fallbacks too (`auth_return_view` is only ever set here)
     if !matches!(app.active_view, ActiveView::Welcome) {

@@ -7,10 +7,12 @@ use tokio_util::sync::CancellationToken;
 use xai_acp_lib::{AcpClientTx, AcpGatewaySender};
 
 use crate::{
-    pi_auth::{PiAuth, PiLoginEvent},
+    pi_auth::{LoginProvider, PiAuth, PiLoginEvent},
     pi_rpc::{PiEvent, PiRpc},
     skills,
 };
+
+const PI_AUTH_METHOD_PREFIX: &str = "seraph.pi:";
 
 type SpawnFuture =
     Pin<Box<dyn Future<Output = Result<xai_grok_pager::acp::spawn::SpawnedAgent>> + Send>>;
@@ -116,6 +118,37 @@ fn acp_error(error: impl std::fmt::Display) -> acp::Error {
     acp::Error::new(acp::ErrorCode::InternalError.into(), error.to_string())
 }
 
+fn pi_auth_method_id(provider: &str, auth_type: &str) -> Result<String> {
+    Ok(format!(
+        "{PI_AUTH_METHOD_PREFIX}{}",
+        serde_json::to_string(&(provider, auth_type))?
+    ))
+}
+
+fn parse_pi_auth_method(id: &str) -> Option<(String, String)> {
+    let encoded = id.strip_prefix(PI_AUTH_METHOD_PREFIX)?;
+    serde_json::from_str(encoded).ok()
+}
+
+fn acp_auth_method(provider: LoginProvider, backend_ready: bool) -> Result<acp::AuthMethod> {
+    let signed_in = provider.signed_in || (backend_ready && provider.provider == "openai-codex");
+    let mut meta = acp::Meta::new();
+    meta.insert("signedIn".into(), signed_in.into());
+    meta.insert("seraphBackendReady".into(), backend_ready.into());
+    Ok(acp::AuthMethod::Agent(
+        acp::AuthMethodAgent::new(
+            pi_auth_method_id(&provider.provider, &provider.auth_type)?,
+            provider.label,
+        )
+        .description(if signed_in {
+            "Signed in"
+        } else {
+            "Sign in with Pi"
+        })
+        .meta(meta),
+    ))
+}
+
 fn prompt_text(blocks: &[acp::ContentBlock]) -> String {
     blocks
         .iter()
@@ -173,14 +206,19 @@ fn model_default_effort(models: &[acp::ModelInfo], id: &str) -> Option<String> {
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for SeraphAgent {
     async fn initialize(&self, _: acp::InitializeRequest) -> acp::Result<acp::InitializeResponse> {
-        let auth_methods = if *self.authenticated.lock().await {
-            vec![]
-        } else {
-            vec![acp::AuthMethod::Agent(
-                acp::AuthMethodAgent::new("openai-codex", "ChatGPT")
-                    .description("Use your Codex subscription through Pi authentication"),
-            )]
-        };
+        let backend_ready = *self.authenticated.lock().await;
+        let mut providers = self
+            .auth
+            .lock()
+            .await
+            .login_providers()
+            .await
+            .map_err(acp_error)?;
+        providers.sort_by_key(|provider| provider.provider != "openai-codex");
+        let auth_methods = providers
+            .into_iter()
+            .map(|provider| acp_auth_method(provider, backend_ready).map_err(acp_error))
+            .collect::<acp::Result<Vec<_>>>()?;
         Ok(acp::InitializeResponse::new(acp::ProtocolVersion::V1)
             .agent_info(
                 acp::Implementation::new("seraph", env!("CARGO_PKG_VERSION")).title("SERAPH"),
@@ -190,11 +228,18 @@ impl acp::Agent for SeraphAgent {
 
     async fn authenticate(
         &self,
-        _: acp::AuthenticateRequest,
+        args: acp::AuthenticateRequest,
     ) -> acp::Result<acp::AuthenticateResponse> {
+        let method_id = args.method_id.0.as_ref();
+        let method = parse_pi_auth_method(method_id).or_else(|| {
+            (method_id == "openai-codex").then(|| ("openai-codex".to_owned(), "oauth".to_owned()))
+        });
+        let Some((provider, auth_type)) = method else {
+            return Err(acp::Error::invalid_params());
+        };
         let mut auth = self.auth.lock().await;
         let login_id = auth
-            .start_login("openai-codex", "oauth")
+            .start_login(&provider, &auth_type)
             .await
             .map_err(acp_error)?;
         loop {
@@ -202,13 +247,23 @@ impl acp::Agent for SeraphAgent {
                 PiLoginEvent::AuthUrl { url, .. } => {
                     webbrowser::open(&url).map_err(acp_error)?;
                 }
-                PiLoginEvent::DeviceCode { url, .. } => {
-                    webbrowser::open(&url).map_err(acp_error)?;
+                PiLoginEvent::DeviceCode { code, url } => {
+                    return Err(acp_error(format!(
+                        "Pi authentication for {provider} requires device code {code} at {url}; this prompt is not supported in the Grok shell yet"
+                    )));
                 }
                 PiLoginEvent::Progress(_) => {}
-                PiLoginEvent::Complete { provider, .. } if provider == "openai-codex" => break,
-                PiLoginEvent::Complete { .. } => {
-                    return Err(acp_error("Pi login selected the wrong provider"));
+                PiLoginEvent::Complete {
+                    provider: completed,
+                    ..
+                } if completed == provider => break,
+                PiLoginEvent::Complete {
+                    provider: completed,
+                    ..
+                } => {
+                    return Err(acp_error(format!(
+                        "Pi login returned {completed}, expected {provider}"
+                    )));
                 }
                 PiLoginEvent::Prompt {
                     kind,
@@ -238,7 +293,10 @@ impl acp::Agent for SeraphAgent {
                 }
             }
         }
-        *self.authenticated.lock().await = true;
+        drop(auth);
+        if provider == "openai-codex" {
+            *self.authenticated.lock().await = true;
+        }
         Ok(acp::AuthenticateResponse::default())
     }
 

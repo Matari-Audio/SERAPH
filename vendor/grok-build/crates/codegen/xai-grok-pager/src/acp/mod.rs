@@ -726,6 +726,15 @@ async fn eager_auth_or_login_fallback(
     AuthStartMode,
     Option<serde_json::Value>,
 ) {
+    if auth_methods.first().is_some_and(|method| {
+        method
+            .meta()
+            .and_then(|meta| meta.get("seraphBackendReady"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }) {
+        return (false, None, None, AuthStartMode::Pending, None);
+    }
     if auth_methods.is_empty() {
         if backend_installed() {
             return (false, None, None, AuthStartMode::Pending, None);
