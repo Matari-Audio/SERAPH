@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::{Value, json};
 
@@ -52,6 +52,19 @@ impl TaskBoard {
                      actor TEXT NOT NULL CHECK (trim(actor) <> ''),
                      claimed INTEGER NOT NULL CHECK (claimed IN (0, 1)),
                      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 CREATE TABLE IF NOT EXISTS agent_id_sequence (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT
+                 );
+                 CREATE TABLE IF NOT EXISTS agent_messages (
+                     id INTEGER PRIMARY KEY,
+                     sender TEXT NOT NULL CHECK (trim(sender) <> ''),
+                     recipient TEXT NOT NULL CHECK (trim(recipient) <> ''),
+                     body TEXT NOT NULL CHECK (trim(body) <> ''),
+                     dedupe_key TEXT NOT NULL CHECK (trim(dedupe_key) <> ''),
+                     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                     delivered_at INTEGER,
+                     UNIQUE (sender, dedupe_key)
                  );",
             )
             .context("initialize SERAPH task database")?;
@@ -231,6 +244,105 @@ impl TaskBoard {
 
     pub fn fail(&mut self, id: i64, owner: &str) -> Result<bool> {
         self.finish(id, owner, "failed")
+    }
+
+    pub fn allocate_agent_id(&mut self) -> Result<u64> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("INSERT INTO agent_id_sequence DEFAULT VALUES", [])?;
+        let id = u64::try_from(tx.last_insert_rowid()).context("agent id is out of range")?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn agent_exists(&self, id: u64) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM agent_id_sequence WHERE id = ?1)",
+            [i64::try_from(id).context("agent id is out of range")?],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn send_message(
+        &mut self,
+        sender: &str,
+        recipient: &str,
+        body: &str,
+        dedupe_key: &str,
+    ) -> Result<(i64, bool)> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted = tx.execute(
+            "INSERT INTO agent_messages (sender, recipient, body, dedupe_key)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (sender, dedupe_key) DO NOTHING",
+            params![sender, recipient, body, dedupe_key],
+        )? == 1;
+        let (id, stored_recipient, stored_body): (i64, String, String) = tx.query_row(
+            "SELECT id, recipient, body FROM agent_messages
+             WHERE sender = ?1 AND dedupe_key = ?2",
+            params![sender, dedupe_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if stored_recipient != recipient || stored_body != body {
+            bail!("message dedupe key already identifies different content");
+        }
+        tx.commit()?;
+        Ok((id, inserted))
+    }
+
+    pub fn receive_messages(
+        &mut self,
+        recipient: &str,
+        limit: usize,
+        max_projection_bytes: usize,
+    ) -> Result<Value> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut messages = Vec::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT id, sender, body, dedupe_key, created_at
+                 FROM agent_messages
+                 WHERE recipient = ?1 AND delivered_at IS NULL
+                 ORDER BY id
+                 LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![recipient, limit as i64])?;
+            while let Some(row) = rows.next()? {
+                messages.push(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "sender": row.get::<_, String>(1)?,
+                    "message": row.get::<_, String>(2)?,
+                    "key": row.get::<_, String>(3)?,
+                    "created_at": row.get::<_, i64>(4)?,
+                }));
+                if serde_json::to_vec(&json!({
+                    "recipient": recipient,
+                    "messages": &messages,
+                }))?
+                .len()
+                    > max_projection_bytes
+                {
+                    messages.pop();
+                    break;
+                }
+            }
+        }
+        {
+            let mut deliver = tx.prepare(
+                "UPDATE agent_messages SET delivered_at = unixepoch()
+                 WHERE id = ?1 AND delivered_at IS NULL",
+            )?;
+            for message in &messages {
+                deliver.execute([message["id"].as_i64().context("message id is invalid")?])?;
+            }
+        }
+        tx.commit()?;
+        Ok(json!({ "recipient": recipient, "messages": messages }))
     }
 
     fn finish(&mut self, id: i64, owner: &str, status: &str) -> Result<bool> {
