@@ -1135,6 +1135,19 @@ impl PromptWidget {
                     ghost.token_range.end += start;
                 }
             });
+        } else {
+            let registry = self.slash_controller.registry();
+            self.slash_state.update(|snapshot| {
+                snapshot.inline_ghost = None;
+                snapshot.matches.retain(|row| {
+                    let name = row.command_name();
+                    !matches!(name, "login" | "settings" | "model") && !registry.is_skill(name)
+                });
+                snapshot.open = !snapshot.matches.is_empty();
+                snapshot.selected = snapshot
+                    .selected
+                    .min(snapshot.matches.len().saturating_sub(1));
+            });
         }
 
         self.slash_state.update(|snap| {

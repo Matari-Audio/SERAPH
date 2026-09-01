@@ -302,6 +302,13 @@ impl CommandRegistry {
             .is_some_and(|s| *s == CommandSource::Builtin)
     }
 
+    pub(crate) fn is_skill(&self, key: &str) -> bool {
+        self.key_to_index
+            .get(key)
+            .and_then(|idx| self.commands.get(*idx))
+            .is_some_and(|command| command.is_skill())
+    }
+
     /// All triggers (for fuzzy matching).
     pub fn triggers(&self) -> &[CommandTrigger] {
         &self.triggers
