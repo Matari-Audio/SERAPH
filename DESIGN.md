@@ -127,9 +127,9 @@ There are no shadows. Depth is flat and structural: the selected agent row uses 
 
 ## Shapes
 
-The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock headers extend a straight divider across unused width; All Agents groups use only a straight top border. Transcript messages, headers, status rails, dock rows, and roster rows remain unboxed. Status is expressed with Grok glyph primitives: `●` for complete or failed, `○` for other idle agent states, the eight-frame `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧` spinner for running agents, and `◆` / `◇` for active / other task states.
+The composer, shortcut panel, and temporary authentication pane use Ratatui’s rounded border glyphs. Dock headers extend a straight divider across unused width; All Agents groups use only a straight top border. Transcript messages, headers, status rails, dock rows, and roster rows remain unboxed. Status is expressed with Grok glyph primitives: `●` for complete or failed, `○` for other idle agent states, the eight-frame `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧` spinner for running agents, and `◆` / `◇` for active / other task states.
 
-**The One Enclosure Rule.** The composer is the persistent enclosure; do not turn transcript messages or agent rows into cards.
+**The One Enclosure Rule.** The composer is the persistent enclosure; temporary modal tasks may replace it, but transcript messages and agent rows remain unboxed.
 
 ## Components
 
@@ -168,6 +168,12 @@ The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock head
 - **Left:** Muted account or signed-out state.
 - **Right:** Teal model, violet effort selector, and muted help/account hints separated by gray vertical rules.
 
+### Authentication
+
+- **Ownership:** Prime/Pi's production ModelRuntime owns login, locked credential storage, and refresh; Codex receives only short-lived access tokens.
+- **Surface:** `L` opens Pi's browser/device-code choice in a Prime-derived full-pane dialog over the Grok shell.
+- **States:** Browser link, manual redirect/code fallback, device verification code, progress, and quiet cancellation remain inside the dialog.
+
 ### All Agents Roster
 
 - **Header:** Bold title plus muted connected count.
@@ -192,7 +198,7 @@ The composer and shortcut panel use Ratatui’s rounded border glyphs. Dock head
 - **Do** use the exact status mapping: violet running, green completed, red failed, amber other.
 - **Do** keep shared SQLite task updates out of conversation context.
 - **Do** preserve terminal-cell alignment, keyboard navigation, and the selected agent’s one-line result preview.
-- **Do** use rounded borders only for the composer and shortcut panel.
+- **Do** reserve rounded borders for the composer and temporary modal surfaces.
 
 ### Don't:
 

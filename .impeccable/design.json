@@ -82,6 +82,13 @@
       "css": ".ds-agent-section { position: relative; padding: 1em 1ch 0; border-top: 1px solid #242424; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-section h3 { position: absolute; top: -0.7em; left: 1ch; margin: 0; padding: 0 0.5ch; background: #141414; color: #e1e1e1; font-size: 1em; font-weight: 400; } .ds-agent-section div { white-space: nowrap; overflow: hidden; } .ds-agent-complete { color: #9ece6a; } .ds-agent-running { color: #bb9af7; } .ds-agent-muted { color: #6c6c6c; }"
     },
     {
+      "name": "Prime/Pi Authentication Pane",
+      "kind": "card",
+      "description": "Prime-derived full-pane browser, manual fallback, and device-code login over the Grok shell.",
+      "html": "<section class=\"ds-auth\"><span class=\"ds-auth-title\"> Login to OpenAI (ChatGPT Plus/Pro) </span><strong>Browser sign-in</strong><p>The sign-in page should already be opening. If it did not open, use the link below.</p><b>Sign-in link</b><code>https://auth.openai.com/…</code><small>Esc cancel</small></section>",
+      "css": ".ds-auth { position: relative; padding: 2em 2ch 1em; border: 1px solid #242424; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-auth-title { position: absolute; top: -0.7em; left: 1ch; padding: 0 0.5ch; background: #141414; font-weight: 700; } .ds-auth p, .ds-auth small { display: block; color: #6c6c6c; } .ds-auth code { display: block; margin: 0.5em 0; color: #7aa2f7; white-space: normal; overflow-wrap: anywhere; }"
+    },
+    {
       "name": "Shortcut Panel",
       "kind": "card",
       "description": "Rounded keyboard reference shown over the transcript.",
@@ -105,7 +112,7 @@
       { "name": "The Terminal Owns Type Rule", "body": "Never introduce a bundled face or a separate size scale into these surfaces; preserve the terminal’s metrics.", "section": "typography" },
       { "name": "The Transcript Wins Rule", "body": "Dynamic dock chrome may grow with live work, but it must preserve at least one transcript row.", "section": "layout" },
       { "name": "The Flat Workbench Rule", "body": "Add hierarchy with a tonal selection or one border, never stacked cards or simulated elevation.", "section": "elevation" },
-      { "name": "The One Enclosure Rule", "body": "The composer is the persistent enclosure; do not turn transcript messages or agent rows into cards.", "section": "shapes" }
+      { "name": "The One Enclosure Rule", "body": "The composer is the persistent enclosure; temporary modal tasks may replace it, but transcript messages and agent rows remain unboxed.", "section": "shapes" }
     ],
     "dos": [
       "Do hide every empty dock section and expose at most two rows per expanded section.",
@@ -113,7 +120,7 @@
       "Do use the exact status mapping: violet running, green completed, red failed, amber other.",
       "Do keep shared SQLite task updates out of conversation context.",
       "Do preserve terminal-cell alignment, keyboard navigation, and the selected agent’s one-line result preview.",
-      "Do use rounded borders only for the composer and shortcut panel."
+      "Do reserve rounded borders for the composer and temporary modal surfaces."
     ],
     "donts": [
       "Don't box transcript messages or every agent row into cards.",
