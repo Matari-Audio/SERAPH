@@ -1,6 +1,7 @@
 mod agents;
 mod capability;
 mod codex;
+mod grok_ui;
 mod kernel;
 mod tasks;
 mod tui;

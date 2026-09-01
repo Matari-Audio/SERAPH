@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-01T09:30:04Z",
+  "generatedAt": "2026-09-01T09:50:41Z",
   "title": "Design System: SERAPH",
   "extensions": {
     "colorMeta": {
@@ -8,6 +8,7 @@
       "panel": { "role": "neutral", "displayName": "Selection Charcoal" },
       "text": { "role": "neutral", "displayName": "Primary Text" },
       "muted": { "role": "neutral", "displayName": "Muted Text" },
+      "section-label": { "role": "neutral", "displayName": "Section Label" },
       "command-blue": { "role": "primary", "displayName": "Command Blue" },
       "agent-violet": { "role": "secondary", "displayName": "Agent Violet" },
       "connected-green": { "role": "tertiary", "displayName": "Connected Green" },
@@ -24,7 +25,7 @@
     },
     "shadows": [],
     "motion": [
-      { "name": "running-spinner-frame", "value": "80ms", "purpose": "Advances the four-glyph running-agent indicator while work is active." }
+      { "name": "running-spinner-frame", "value": "80ms", "purpose": "Advances the eight-frame Braille running-agent indicator while work is active." }
     ]
   },
   "components": [
@@ -32,23 +33,23 @@
       "name": "Shell Header",
       "kind": "nav",
       "description": "Project identity and the compact live agent rail.",
-      "html": "<div class=\"ds-shell-header\"><span><strong>SERAPH</strong>&nbsp;&nbsp;<span class=\"ds-shell-muted\">project</span></span><span><span class=\"ds-shell-green\">● main</span>&nbsp;&nbsp;<span class=\"ds-shell-violet\">⋅ a12</span>&nbsp;&nbsp;<span class=\"ds-shell-muted\">+2</span></span></div>",
-      "css": ".ds-shell-header { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #e1e1e1; font-family: monospace; white-space: nowrap; } .ds-shell-muted { color: #848484; } .ds-shell-green { color: #9ece6a; } .ds-shell-violet { color: #bb9af7; }"
+      "html": "<div class=\"ds-shell-header\"><span><strong>SERAPH</strong>&nbsp;&nbsp;<span class=\"ds-shell-muted\">project</span></span><span><span class=\"ds-shell-green\">● main</span>&nbsp;&nbsp;<span class=\"ds-shell-violet\">⠋ a12</span>&nbsp;&nbsp;<span class=\"ds-shell-muted\">+2</span></span></div>",
+      "css": ".ds-shell-header { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #e1e1e1; font-family: monospace; white-space: nowrap; } .ds-shell-muted { color: #6c6c6c; } .ds-shell-green { color: #9ece6a; } .ds-shell-violet { color: #bb9af7; }"
     },
     {
       "name": "Transcript Roles",
       "kind": "custom",
       "description": "Flat user, assistant, system, and error message treatments.",
       "html": "<div class=\"ds-transcript\"><div><strong class=\"ds-transcript-user\">❯</strong> Inspect the current project</div><div>Working through the implementation.</div><div class=\"ds-transcript-system\"><span>●</span> Connected.</div><div class=\"ds-transcript-error\"><strong>!</strong> Could not submit.</div></div>",
-      "css": ".ds-transcript { display: grid; gap: 1em; padding: 1ch; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-transcript-user { color: #7aa2f7; } .ds-transcript-system { color: #848484; } .ds-transcript-system span { color: #9ece6a; } .ds-transcript-error { color: #f7768e; }"
+      "css": ".ds-transcript { display: grid; gap: 1em; padding: 1ch; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-transcript-user { color: #7aa2f7; } .ds-transcript-system { color: #6c6c6c; } .ds-transcript-system span { color: #9ece6a; } .ds-transcript-error { color: #f7768e; }"
     },
     {
       "name": "Grok Dock V2",
       "kind": "custom",
       "refersTo": "grok-dock",
-      "description": "Variable-height live subagent and shared-task dock with bounded rows.",
-      "html": "<div class=\"ds-dock\"><div class=\"ds-dock-header\"><span>▾ <strong>Subagents</strong> 3 </span><i></i><b>↓ all agents</b></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-running\">⋅ agent 12</em> Inspect the release path</span><small>running</small></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-complete\">● agent 8</em> Document the shell</span><small>completed</small></div><div class=\"ds-dock-more\">▾ 1 more</div><div class=\"ds-dock-header\"><span>▾ <strong>Tasks</strong> 3 </span><i></i></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-running\">◆ #7</em> Verify shared state</span><small>agent-12 · in_progress</small></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-complete\">● #4</em> Capture direction</span><small>unclaimed · completed</small></div><div class=\"ds-dock-more\">▾ 1 more</div></div>",
-      "css": ".ds-dock { background: #141414; color: #e1e1e1; font-family: monospace; } .ds-dock-header, .ds-dock-row { display: flex; align-items: center; gap: 1ch; white-space: nowrap; overflow: hidden; } .ds-dock-header { color: #848484; } .ds-dock-header strong { color: #e1e1e1; } .ds-dock-header i { flex: 1; height: 1px; background: #585858; } .ds-dock-header b { color: #7aa2f7; font-weight: 400; } .ds-dock-row { justify-content: space-between; padding-left: 2ch; } .ds-dock-row span { overflow: hidden; text-overflow: ellipsis; } .ds-dock-row em { font-style: normal; } .ds-dock-row small, .ds-dock-more { color: #848484; font-size: 1em; } .ds-dock-running { color: #bb9af7; } .ds-dock-complete { color: #9ece6a; } .ds-dock-more { padding-left: 4ch; }"
+      "description": "Donor-derived collapsible subagent and shared-task dock; empty sections take no space.",
+      "html": "<div class=\"ds-dock\"><div class=\"ds-dock-header\"><span>▾ <strong>Subagents</strong> 3 </span><i></i></div><div class=\"ds-dock-row ds-dock-focused\"><span><em class=\"ds-dock-running\">⠋ agent 12</em> Inspect the release path</span><small>running <b>[↗]</b></small></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-complete\">● agent 8</em> Document the shell</span><small>completed</small></div><div class=\"ds-dock-more\">▾ 1 more</div><div class=\"ds-dock-header\"><span>▾ <strong>Tasks</strong> 3 </span><i></i></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-running\">◆ #7</em> Verify shared state</span><small>agent-12 · in_progress</small></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-complete\">● #4</em> Capture direction</span><small>unclaimed · completed</small></div><div class=\"ds-dock-more\">▾ 1 more</div></div>",
+      "css": ".ds-dock { background: #141414; color: #e1e1e1; font-family: monospace; } .ds-dock-header, .ds-dock-row { display: flex; align-items: center; gap: 1ch; white-space: nowrap; overflow: hidden; } .ds-dock-header { color: #6c6c6c; } .ds-dock-header strong { color: #787878; } .ds-dock-header i { flex: 1; height: 1px; background: #585858; } .ds-dock-row { justify-content: space-between; padding-left: 2ch; } .ds-dock-focused { background: #242424; } .ds-dock-row span { overflow: hidden; } .ds-dock-row em { font-style: normal; } .ds-dock-row small, .ds-dock-more { color: #6c6c6c; font-size: 1em; } .ds-dock-row small b { color: #787878; font-weight: 400; } .ds-dock-running { color: #bb9af7; } .ds-dock-complete { color: #9ece6a; } .ds-dock-more { padding-left: 4ch; }"
     },
     {
       "name": "Composer",
@@ -56,29 +57,29 @@
       "refersTo": "composer",
       "description": "The shell's sole persistent enclosure and primary input.",
       "html": "<label class=\"ds-composer\"><span class=\"ds-composer-title\"> ❯ </span><textarea aria-label=\"Ask SERAPH\" placeholder=\"Ask SERAPH…\"></textarea></label>",
-      "css": ".ds-composer { position: relative; display: block; height: 3em; border: 1px solid #505058; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-composer-title { position: absolute; top: -0.65em; left: 1ch; padding: 0 0.5ch; background: #141414; color: #7aa2f7; font-weight: 700; } .ds-composer textarea { width: calc(100% - 2ch); height: calc(100% - 1em); margin: 0.5em 1ch; border: 0; outline: 0; resize: none; background: transparent; color: #e1e1e1; font: inherit; } .ds-composer textarea::placeholder { color: #848484; } .ds-composer:focus-within { border-color: #505058; }"
+      "css": ".ds-composer { position: relative; display: block; height: 3em; border: 1px solid #505058; border-radius: 0.5em; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-composer-title { position: absolute; top: -0.65em; left: 1ch; padding: 0 0.5ch; background: #141414; color: #7aa2f7; font-weight: 700; } .ds-composer textarea { width: calc(100% - 2ch); height: calc(100% - 1em); margin: 0.5em 1ch; border: 0; outline: 0; resize: none; background: transparent; color: #e1e1e1; font: inherit; } .ds-composer textarea::placeholder { color: #6c6c6c; } .ds-composer:focus-within { border-color: #505058; }"
     },
     {
       "name": "Status Footer",
       "kind": "nav",
       "description": "Account, model, effort, and shortcut metadata in one row.",
       "html": "<div class=\"ds-status-footer\"><span>signed out</span><span><b>gpt-5.6-sol</b><i>│</i><em>&lt; high &gt;</em><i>│</i>? help&nbsp; L account</span></div>",
-      "css": ".ds-status-footer { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #848484; font-family: monospace; white-space: nowrap; } .ds-status-footer b { color: #1abc9c; font-weight: 400; } .ds-status-footer em { color: #bb9af7; font-style: normal; } .ds-status-footer i { padding: 0 2ch; color: #585858; font-style: normal; }"
+      "css": ".ds-status-footer { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #6c6c6c; font-family: monospace; white-space: nowrap; } .ds-status-footer b { color: #1abc9c; font-weight: 400; } .ds-status-footer em { color: #bb9af7; font-style: normal; } .ds-status-footer i { padding: 0 2ch; color: #585858; font-style: normal; }"
     },
     {
       "name": "Selected Agent Row",
       "kind": "custom",
       "refersTo": "agent-selected",
       "description": "Prime-style roster row with preserved status color and one-line result preview.",
-      "html": "<div class=\"ds-agent-block\"><div class=\"ds-agent-row\"><span class=\"ds-agent-running\">⋅</span> <strong>agent 12</strong>&nbsp;&nbsp;<span class=\"ds-agent-running\">running&nbsp;&nbsp;</span>Inspect the release path</div><div class=\"ds-agent-preview\">First result line appears here.</div></div>",
-      "css": ".ds-agent-block { background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-row { padding: 0 1ch; background: #242424; white-space: nowrap; overflow: hidden; } .ds-agent-running { color: #bb9af7; } .ds-agent-preview { padding-left: 4ch; color: #848484; white-space: nowrap; overflow: hidden; }"
+      "html": "<div class=\"ds-agent-block\"><div class=\"ds-agent-row\"><span class=\"ds-agent-running\">⠋</span> <strong>agent 12</strong>&nbsp;&nbsp;<span class=\"ds-agent-running\">running&nbsp;&nbsp;</span>Inspect the release path</div><div class=\"ds-agent-preview\">First result line appears here.</div></div>",
+      "css": ".ds-agent-block { background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-row { padding: 0 1ch; background: #242424; white-space: nowrap; overflow: hidden; } .ds-agent-running { color: #bb9af7; } .ds-agent-preview { padding-left: 4ch; color: #6c6c6c; white-space: nowrap; overflow: hidden; }"
     },
     {
       "name": "All Agents Section",
       "kind": "card",
       "description": "Flat roster grouping separated by a single top rule.",
       "html": "<section class=\"ds-agent-section\"><h3> Current project </h3><div><span class=\"ds-agent-complete\">●</span> <strong>main</strong>&nbsp;&nbsp;<span class=\"ds-agent-muted\">this conversation</span></div><div><span class=\"ds-agent-running\">⋅</span> <strong>agent 12</strong>&nbsp;&nbsp;<span class=\"ds-agent-running\">running</span>&nbsp;&nbsp;Inspect the release path</div></section>",
-      "css": ".ds-agent-section { position: relative; padding: 1em 1ch 0; border-top: 1px solid #242424; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-section h3 { position: absolute; top: -0.7em; left: 1ch; margin: 0; padding: 0 0.5ch; background: #141414; color: #e1e1e1; font-size: 1em; font-weight: 400; } .ds-agent-section div { white-space: nowrap; overflow: hidden; } .ds-agent-complete { color: #9ece6a; } .ds-agent-running { color: #bb9af7; } .ds-agent-muted { color: #848484; }"
+      "css": ".ds-agent-section { position: relative; padding: 1em 1ch 0; border-top: 1px solid #242424; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-agent-section h3 { position: absolute; top: -0.7em; left: 1ch; margin: 0; padding: 0 0.5ch; background: #141414; color: #e1e1e1; font-size: 1em; font-weight: 400; } .ds-agent-section div { white-space: nowrap; overflow: hidden; } .ds-agent-complete { color: #9ece6a; } .ds-agent-running { color: #bb9af7; } .ds-agent-muted { color: #6c6c6c; }"
     },
     {
       "name": "Shortcut Panel",
@@ -90,10 +91,11 @@
   ],
   "narrative": {
     "northStar": "The Quiet Agent Workbench",
-    "overview": "SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: dark GrokNight neutrals, a flat transcript, Dock V2, compact status chrome, and a rounded prompt. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.\n\nThe interface is dense without feeling crowded. Color is reserved for identity, state, and action; structure comes from terminal rows, alignment, whitespace, and sparse borders rather than panels around every region.",
+    "overview": "SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: GrokNight theme and glyph primitives plus Dock V2 are ported directly from Grok Build, then modified for SERAPH’s agents and shared tasks. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.\n\nThe interface is dense without feeling crowded. Color is reserved for identity, state, and action; structure comes from terminal rows, alignment, whitespace, and sparse borders rather than panels around every region.",
     "keyCharacteristics": [
       "Near-black full-screen canvas with no ornamental backdrop.",
       "Flat, dominant transcript above a bounded live subagent-and-task dock.",
+      "Empty dock sections disappear; visible sections become keyboard-focusable from the composer.",
       "Rounded composer and help chrome; roster sections use top rules only.",
       "Agent state stays visible in the shell and expands into a keyboard-first roster.",
       "Terminal-native typography, spacing, glyphs, and motion."
@@ -106,7 +108,8 @@
       { "name": "The One Enclosure Rule", "body": "The composer is the persistent enclosure; do not turn transcript messages or agent rows into cards.", "section": "shapes" }
     ],
     "dos": [
-      "Do keep chat dominant while exposing at most two subagents and two shared tasks in Dock V2.",
+      "Do hide every empty dock section and expose at most two rows per expanded section.",
+      "Do derive dock height, rendering, and cursor order from one shared visible-row walk.",
       "Do use the exact status mapping: violet running, green completed, red failed, amber other.",
       "Do keep shared SQLite task updates out of conversation context.",
       "Do preserve terminal-cell alignment, keyboard navigation, and the selected agent’s one-line result preview.",
