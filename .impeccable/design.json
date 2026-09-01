@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-01T08:52:53Z",
+  "generatedAt": "2026-09-01T09:30:04Z",
   "title": "Design System: SERAPH",
   "extensions": {
     "colorMeta": {
@@ -43,12 +43,12 @@
       "css": ".ds-transcript { display: grid; gap: 1em; padding: 1ch; background: #141414; color: #e1e1e1; font-family: monospace; } .ds-transcript-user { color: #7aa2f7; } .ds-transcript-system { color: #848484; } .ds-transcript-system span { color: #9ece6a; } .ds-transcript-error { color: #f7768e; }"
     },
     {
-      "name": "Agent Summary",
-      "kind": "nav",
-      "refersTo": "agent-summary",
-      "description": "Persistent one-row agent count and roster entry point.",
-      "html": "<div class=\"ds-agent-summary\"><span><strong>◇ agents</strong>&nbsp; <span>4 total · 2 running</span></span><span class=\"ds-agent-action\">↓ all agents</span></div>",
-      "css": ".ds-agent-summary { display: flex; justify-content: space-between; gap: 1ch; padding: 0 1ch; background: #141414; color: #848484; font-family: monospace; white-space: nowrap; } .ds-agent-summary strong { color: #bb9af7; } .ds-agent-action { color: #7aa2f7; }"
+      "name": "Grok Dock V2",
+      "kind": "custom",
+      "refersTo": "grok-dock",
+      "description": "Variable-height live subagent and shared-task dock with bounded rows.",
+      "html": "<div class=\"ds-dock\"><div class=\"ds-dock-header\"><span>▾ <strong>Subagents</strong> 3 </span><i></i><b>↓ all agents</b></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-running\">⋅ agent 12</em> Inspect the release path</span><small>running</small></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-complete\">● agent 8</em> Document the shell</span><small>completed</small></div><div class=\"ds-dock-more\">▾ 1 more</div><div class=\"ds-dock-header\"><span>▾ <strong>Tasks</strong> 3 </span><i></i></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-running\">◆ #7</em> Verify shared state</span><small>agent-12 · in_progress</small></div><div class=\"ds-dock-row\"><span><em class=\"ds-dock-complete\">● #4</em> Capture direction</span><small>unclaimed · completed</small></div><div class=\"ds-dock-more\">▾ 1 more</div></div>",
+      "css": ".ds-dock { background: #141414; color: #e1e1e1; font-family: monospace; } .ds-dock-header, .ds-dock-row { display: flex; align-items: center; gap: 1ch; white-space: nowrap; overflow: hidden; } .ds-dock-header { color: #848484; } .ds-dock-header strong { color: #e1e1e1; } .ds-dock-header i { flex: 1; height: 1px; background: #585858; } .ds-dock-header b { color: #7aa2f7; font-weight: 400; } .ds-dock-row { justify-content: space-between; padding-left: 2ch; } .ds-dock-row span { overflow: hidden; text-overflow: ellipsis; } .ds-dock-row em { font-style: normal; } .ds-dock-row small, .ds-dock-more { color: #848484; font-size: 1em; } .ds-dock-running { color: #bb9af7; } .ds-dock-complete { color: #9ece6a; } .ds-dock-more { padding-left: 4ch; }"
     },
     {
       "name": "Composer",
@@ -90,10 +90,10 @@
   ],
   "narrative": {
     "northStar": "The Quiet Agent Workbench",
-    "overview": "SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: dark GrokNight neutrals, a flat transcript, compact status chrome, and a rounded prompt. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.\n\nThe interface is dense without feeling crowded. Color is reserved for identity, state, and action; structure comes from terminal rows, alignment, whitespace, and sparse borders rather than panels around every region.",
+    "overview": "SERAPH is a full-screen terminal workspace that keeps the primary conversation dominant while making parallel work continuously legible. Its visual language is deliberately 95% Grok Build: dark GrokNight neutrals, a flat transcript, Dock V2, compact status chrome, and a rounded prompt. The remaining 5% comes from Prime Agent: Down opens a dedicated roster where agent ownership, status, prompt, and result preview scan as one system.\n\nThe interface is dense without feeling crowded. Color is reserved for identity, state, and action; structure comes from terminal rows, alignment, whitespace, and sparse borders rather than panels around every region.",
     "keyCharacteristics": [
       "Near-black full-screen canvas with no ornamental backdrop.",
-      "Flat, dominant transcript framed by one-line operational rails.",
+      "Flat, dominant transcript above a bounded live subagent-and-task dock.",
       "Rounded composer and help chrome; roster sections use top rules only.",
       "Agent state stays visible in the shell and expands into a keyboard-first roster.",
       "Terminal-native typography, spacing, glyphs, and motion."
@@ -101,13 +101,14 @@
     "rules": [
       { "name": "The Status-Only Color Rule", "body": "Accents identify action, agent identity, or runtime state; they do not decorate empty space.", "section": "colors" },
       { "name": "The Terminal Owns Type Rule", "body": "Never introduce a bundled face or a separate size scale into these surfaces; preserve the terminal’s metrics.", "section": "typography" },
-      { "name": "The Transcript Wins Rule", "body": "Fixed chrome stays at six rows total around chat; all flexible height belongs to the conversation.", "section": "layout" },
+      { "name": "The Transcript Wins Rule", "body": "Dynamic dock chrome may grow with live work, but it must preserve at least one transcript row.", "section": "layout" },
       { "name": "The Flat Workbench Rule", "body": "Add hierarchy with a tonal selection or one border, never stacked cards or simulated elevation.", "section": "elevation" },
       { "name": "The One Enclosure Rule", "body": "The composer is the persistent enclosure; do not turn transcript messages or agent rows into cards.", "section": "shapes" }
     ],
     "dos": [
-      "Do keep chat as the dominant surface and agent state visible in one-line rails.",
+      "Do keep chat dominant while exposing at most two subagents and two shared tasks in Dock V2.",
       "Do use the exact status mapping: violet running, green completed, red failed, amber other.",
+      "Do keep shared SQLite task updates out of conversation context.",
       "Do preserve terminal-cell alignment, keyboard navigation, and the selected agent’s one-line result preview.",
       "Do use rounded borders only for the composer and shortcut panel."
     ],

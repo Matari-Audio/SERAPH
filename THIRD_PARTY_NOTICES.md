@@ -31,9 +31,10 @@ SOFTWARE.
 ## xAI Grok Build terminal UI
 
 The terminal color constants, flat transcript, prompt chrome, status rail, agent
-status icons, and roster interaction patterns in `src/tui.rs` are adapted from
-Grok Build at commit `bb7f39d5858cbf5e00de639367f59debbdcb0138`, copyright
-2023-2026 SpaceXAI, under the Apache License 2.0:
+status icons, roster interaction patterns, and Subagents/Tasks dock in
+`src/tui.rs` are adapted from Grok Build at commit
+`bb7f39d5858cbf5e00de639367f59debbdcb0138`, copyright 2023-2026 SpaceXAI,
+under the Apache License 2.0:
 `LICENSES/GROK-BUILD-APACHE-2.0.txt`.
 
 SERAPH changes the product identity, backend, data model, composer shortcuts,
