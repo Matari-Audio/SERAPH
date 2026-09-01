@@ -70,7 +70,8 @@ impl Codex {
             .context("create isolated SERAPH Codex home")?;
         let mut child = Command::new(executable)
             .env("CODEX_HOME", codex_home)
-            .args(["app-server", "--stdio"])
+            // SERAPH owns agent topology; omit Codex's duplicate model-facing agent tools.
+            .args(["-c", "agents.enabled=false", "app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
