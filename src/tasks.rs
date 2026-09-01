@@ -4,6 +4,20 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::{Value, json};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSummary {
+    pub id: i64,
+    pub subject: String,
+    pub status: String,
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSnapshot {
+    pub total: usize,
+    pub tasks: Vec<TaskSummary>,
+}
+
 pub struct TaskBoard {
     connection: Connection,
 }
@@ -116,6 +130,36 @@ impl TaskBoard {
             "tasks": tasks,
             "next_after_id": next_after_id,
         }))?)
+    }
+
+    pub fn snapshot(&self, limit: usize) -> Result<TaskSnapshot> {
+        let total = self
+            .connection
+            .query_row("SELECT count(*) FROM tasks", [], |row| row.get::<_, i64>(0))?
+            .try_into()
+            .context("task count exceeds platform limits")?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, subject, status, owner
+             FROM tasks
+             ORDER BY CASE status
+                 WHEN 'in_progress' THEN 0
+                 WHEN 'pending' THEN 1
+                 WHEN 'failed' THEN 2
+                 ELSE 3
+             END, id DESC
+             LIMIT ?1",
+        )?;
+        let tasks = statement
+            .query_map([limit as i64], |row| {
+                Ok(TaskSummary {
+                    id: row.get(0)?,
+                    subject: row.get(1)?,
+                    status: row.get(2)?,
+                    owner: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(TaskSnapshot { total, tasks })
     }
 
     pub fn claim(&mut self, id: i64, owner: &str) -> Result<(bool, Option<i64>)> {

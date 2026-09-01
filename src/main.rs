@@ -5,7 +5,7 @@ mod kernel;
 mod tasks;
 mod tui;
 
-use std::{env, path::PathBuf, process::ExitCode, time::Duration};
+use std::{env, path::PathBuf, process::ExitCode, thread, time::Duration};
 
 use agents::AgentManager;
 use anyhow::{Context, Result, bail};
@@ -219,6 +219,7 @@ async fn run_controller(
         .await?;
 
     let cwd = env::current_dir().context("read current directory")?;
+    watch_tasks(cwd.clone(), events.clone());
     let mut thread = if signed_in(&account) {
         Some(codex.start_thread(&cwd, Some(&model)).await?)
     } else {
@@ -300,6 +301,49 @@ async fn run_controller(
     result?;
     tools_shutdown?;
     codex_shutdown
+}
+
+fn watch_tasks(project: PathBuf, events: mpsc::Sender<UiEvent>) {
+    thread::spawn(move || {
+        let database = project.join(".seraph/tasks.sqlite3");
+        while !database.exists() {
+            if events.is_closed() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+        let board = match TaskBoard::open(&project) {
+            Ok(board) => board,
+            Err(error) => {
+                let _ = events.blocking_send(UiEvent::BackgroundError(format!(
+                    "Could not watch task board: {error:#}"
+                )));
+                return;
+            }
+        };
+        let mut previous = None;
+        while !events.is_closed() {
+            match board.snapshot(50) {
+                Ok(snapshot) if previous.as_ref() != Some(&snapshot) => {
+                    previous = Some(snapshot.clone());
+                    if events
+                        .blocking_send(UiEvent::TasksChanged(snapshot))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = events.blocking_send(UiEvent::BackgroundError(format!(
+                        "Could not read task board: {error:#}"
+                    )));
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+    });
 }
 
 async fn login(

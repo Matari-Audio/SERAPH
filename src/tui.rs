@@ -1,8 +1,8 @@
 // THESIS: Grok Build's quiet full-screen workbench, with agent state visible without opening another tool.
 // OWN-WORLD: GrokNight neutrals, flat transcript, rounded prompt chrome, restrained TokyoNight status accents.
-// STORY: Work in the main chat, watch parallel agents at the top and below the prompt, press Down for the whole roster.
-// FIRST VIEWPORT: Location and agent rail, dominant transcript, Prime-style agents tile, Grok-style composer and status line.
-// FORM: pinned Grok Build shell plus Prime Agent navigation.
+// STORY: Work in the main chat, watch parallel agents and shared tasks in the dock, press Down for the whole roster.
+// FIRST VIEWPORT: Location and agent rail, dominant transcript, Grok Dock V2, rounded composer, and status line.
+// FORM: pinned Grok Build shell and Dock V2 plus Prime Agent navigation.
 // FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance.
 use std::time::Duration;
 
@@ -21,7 +21,10 @@ use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
+use crate::tasks::{TaskSnapshot, TaskSummary};
+
 const FRAME_INTERVAL: Duration = Duration::from_millis(80);
+const MAX_DOCK_ROWS: usize = 2;
 
 // Derived from Grok Build's Apache-2.0 GrokNight palette.
 const BG: Color = Color::Rgb(20, 20, 20);
@@ -62,7 +65,9 @@ pub enum UiEvent {
     AssistantDelta(String),
     AssistantDone,
     AgentsChanged(Vec<AgentSummary>),
+    TasksChanged(TaskSnapshot),
     Notice(String),
+    BackgroundError(String),
     Error(String),
 }
 
@@ -112,6 +117,7 @@ struct App {
     streaming: bool,
     show_help: bool,
     agents: Vec<AgentSummary>,
+    tasks: TaskSnapshot,
     view: View,
     selected_agent: usize,
     tick: usize,
@@ -133,6 +139,10 @@ impl App {
             streaming: false,
             show_help: false,
             agents: Vec::new(),
+            tasks: TaskSnapshot {
+                total: 0,
+                tasks: Vec::new(),
+            },
             view: View::Chat,
             selected_agent: 0,
             tick: 0,
@@ -184,7 +194,12 @@ impl App {
             }
             UiEvent::AssistantDelta(delta) => {
                 if self.streaming {
-                    if let Some(message) = self.messages.last_mut() {
+                    if let Some(message) = self
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .find(|message| matches!(message.role, Role::Assistant))
+                    {
                         message.text.push_str(&delta);
                     }
                 } else {
@@ -203,8 +218,13 @@ impl App {
                 self.agents = agents;
                 self.selected_agent = self.selected_agent.min(self.agents.len().saturating_sub(1));
             }
+            UiEvent::TasksChanged(tasks) => self.tasks = tasks,
             UiEvent::Notice(text) => self.messages.push(Message {
                 role: Role::System,
+                text,
+            }),
+            UiEvent::BackgroundError(text) => self.messages.push(Message {
+                role: Role::Error,
                 text,
             }),
             UiEvent::Error(text) => {
@@ -480,13 +500,13 @@ fn render(frame: &mut Frame, app: &App) {
     let [
         header_area,
         transcript_area,
-        agents_area,
+        dock_area,
         composer_area,
         footer_area,
     ] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(1),
+        Constraint::Length(dock_height(app).min(area.height.saturating_sub(6))),
         Constraint::Length(3),
         Constraint::Length(1),
     ])
@@ -532,10 +552,7 @@ fn render(frame: &mut Frame, app: &App) {
         frame.render_widget(paragraph.scroll((scroll, 0)), transcript_area);
     }
 
-    frame.render_widget(
-        Paragraph::new(agent_summary_line(app, agents_area.width)),
-        agents_area,
-    );
+    frame.render_widget(Paragraph::new(dock_lines(app, dock_area.width)), dock_area);
     frame.render_widget(&app.composer, composer_area);
     frame.render_widget(
         Paragraph::new(footer_line(app, footer_area.width)),
@@ -619,24 +636,142 @@ fn header_line(app: &App, width: u16) -> Line<'static> {
     joined_line(left, Line::from(right), width)
 }
 
-fn agent_summary_line(app: &App, width: u16) -> Line<'static> {
-    let running = app
-        .agents
-        .iter()
-        .filter(|agent| agent.status == "running")
-        .count();
-    let left = Line::from(vec![
-        Span::styled(" ◇ agents ", Style::default().fg(MAGENTA).bold()),
-        Span::styled(
-            format!("{} total · {running} running", app.agents.len()),
-            Style::default().fg(MUTED),
-        ),
-    ]);
+fn dock_height(app: &App) -> u16 {
+    let section_height = |visible: usize, total: usize| {
+        visible.min(MAX_DOCK_ROWS) + usize::from(total > MAX_DOCK_ROWS)
+    };
+    let agents = 1 + section_height(app.agents.len(), app.agents.len());
+    let tasks =
+        usize::from(app.tasks.total > 0) + section_height(app.tasks.tasks.len(), app.tasks.total);
+    (agents + tasks) as u16
+}
+
+fn dock_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    // Modified from xAI Grok Build's Dock V2. SERAPH keeps sections expanded
+    // until the dock gains its own keyboard focus and mouse hit-testing.
+    let mut lines = vec![dock_header(
+        "Subagents",
+        app.agents.len(),
+        Some("↓ all agents "),
+        width,
+    )];
+    lines.extend(app.agents.iter().take(MAX_DOCK_ROWS).map(|agent| {
+        dock_row(
+            status_icon(agent.status, app.tick),
+            status_color(agent.status),
+            &format!("agent {}", agent.id),
+            &agent.prompt,
+            agent.status,
+            width,
+        )
+    }));
+    if app.agents.len() > MAX_DOCK_ROWS {
+        lines.push(dock_more(app.agents.len() - MAX_DOCK_ROWS));
+    }
+    if app.tasks.total > 0 {
+        lines.push(dock_header("Tasks", app.tasks.total, None, width));
+        lines.extend(
+            app.tasks
+                .tasks
+                .iter()
+                .take(MAX_DOCK_ROWS)
+                .map(|task| task_dock_row(task, width)),
+        );
+        if app.tasks.total > MAX_DOCK_ROWS {
+            lines.push(dock_more(app.tasks.total - MAX_DOCK_ROWS));
+        }
+    }
+    lines
+}
+
+fn dock_header(label: &str, count: usize, action: Option<&str>, width: u16) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled("▾ ", Style::default().fg(MUTED)),
+        Span::styled(label.to_owned(), Style::default().fg(TEXT).bold()),
+        Span::styled(format!(" {count} "), Style::default().fg(MUTED)),
+    ];
+    let used = Line::from(spans.clone()).width()
+        + action
+            .map(|text| Line::from(text).width())
+            .unwrap_or_default();
+    spans.push(Span::styled(
+        "─".repeat((width as usize).saturating_sub(used)),
+        Style::default().fg(Color::Rgb(88, 88, 88)),
+    ));
+    if let Some(action) = action {
+        spans.push(Span::styled(action.to_owned(), Style::default().fg(BLUE)));
+    }
+    Line::from(spans)
+}
+
+fn dock_row(
+    icon: &str,
+    color: Color,
+    kind: &str,
+    description: &str,
+    meta: &str,
+    width: u16,
+) -> Line<'static> {
+    let prefix = format!("  {icon} {kind} ");
+    let meta = format!(" {meta} ");
+    let available = (width as usize).saturating_sub(
+        Line::from(prefix.as_str()).width() + Line::from(meta.as_str()).width() + 1,
+    );
+    let description = one_line(description, available);
     joined_line(
-        left,
-        Line::from(Span::styled("↓ all agents ", Style::default().fg(BLUE))),
+        Line::from(vec![
+            Span::styled(prefix, Style::default().fg(color)),
+            Span::styled(description, Style::default().fg(TEXT)),
+        ]),
+        Line::from(Span::styled(meta, Style::default().fg(MUTED))),
         width,
     )
+}
+
+fn task_dock_row(task: &TaskSummary, width: u16) -> Line<'static> {
+    let owner = task
+        .owner
+        .as_deref()
+        .map(|owner| one_line(owner, 12))
+        .unwrap_or_else(|| "unclaimed".into());
+    dock_row(
+        task_status_icon(&task.status),
+        task_status_color(&task.status),
+        &format!("#{}", task.id),
+        &task.subject,
+        &format!("{owner} · {}", task.status),
+        width,
+    )
+}
+
+fn dock_more(count: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("    ▾ {count} more"),
+        Style::default().fg(MUTED),
+    ))
+}
+
+fn one_line(text: &str, max_width: usize) -> String {
+    let safe = sanitize_display_text(text);
+    let line = safe.lines().next().unwrap_or_default();
+    if Line::from(line).width() <= max_width {
+        return line.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut truncated = String::new();
+    let mut width = 0;
+    for character in line.chars() {
+        let character_width = Span::raw(character.to_string()).width();
+        if width + character_width + 1 > max_width {
+            break;
+        }
+        truncated.push(character);
+        width += character_width;
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn footer_line(app: &App, width: u16) -> Line<'static> {
@@ -799,6 +934,23 @@ fn status_icon(status: &str, tick: usize) -> &'static str {
 fn status_color(status: &str) -> Color {
     match status {
         "running" => MAGENTA,
+        "completed" => GREEN,
+        "failed" => RED,
+        _ => YELLOW,
+    }
+}
+
+fn task_status_icon(status: &str) -> &'static str {
+    match status {
+        "in_progress" => "◆",
+        "completed" | "failed" => "●",
+        _ => "◇",
+    }
+}
+
+fn task_status_color(status: &str) -> Color {
+    match status {
+        "in_progress" => MAGENTA,
         "completed" => GREEN,
         "failed" => RED,
         _ => YELLOW,
