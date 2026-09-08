@@ -12,7 +12,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUSTFLAGS: -D warnings
+  # TODO: drop the allow once vendor/grok-build fixes float_literal_f32_fallback (client.rs:161).
+  RUSTFLAGS: -D warnings -A float_literal_f32_fallback
   RUSTDOCFLAGS: -D warnings
   # Linux system libraries this crate links against (space separated). Edit per repo.
   APT_PACKAGES: "protobuf-compiler"
