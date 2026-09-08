@@ -12,9 +12,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # TODO: drop the allow once vendor/grok-build fixes float_literal_f32_fallback (client.rs:161).
-  RUSTFLAGS: -D warnings -A float_literal_f32_fallback
+  # vendor/grok-build pins 1.94.0 (its rust-toolchain.toml); newer stables add lints it fails.
+  RUSTFLAGS: -D warnings
   RUSTDOCFLAGS: -D warnings
+  TOOLCHAIN: 1.94.0
   # Linux system libraries this crate links against (space separated). Edit per repo.
   APT_PACKAGES: "protobuf-compiler"
 jobs:
@@ -28,8 +29,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
         with:
@@ -56,7 +56,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with: { toolchain: "${{ env.TOOLCHAIN }}" }
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
         with:
           shared-key: test-${{ matrix.os }}
@@ -82,7 +83,7 @@ jobs:
       - id: v
         run: echo "msrv=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].rust_version | select(. != null)] | min // empty')" >> "$GITHUB_OUTPUT"
       - if: steps.v.outputs.msrv != ''
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: ${{ steps.v.outputs.msrv }}
       - if: steps.v.outputs.msrv != ''
