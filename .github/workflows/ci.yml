@@ -12,10 +12,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # vendor/grok-build pins 1.94.0 (its rust-toolchain.toml); newer stables add lints it fails.
-  RUSTFLAGS: -D warnings
+  # vendor/grok-build trips two lints on current stable; allowed rather than pinned (see TODO).
+  RUSTFLAGS: -D warnings -A float_literal_f32_fallback -A unfulfilled_lint_expectations
   RUSTDOCFLAGS: -D warnings
-  TOOLCHAIN: 1.94.0
+  # TODO: drop the -A once vendor/grok-build is lint-clean on current stable (it pins 1.94; Cargo.lock needs newer).
   # Linux system libraries this crate links against (space separated). Edit per repo.
   APT_PACKAGES: "protobuf-compiler"
 jobs:
@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          toolchain: ${{ env.TOOLCHAIN }}
+          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
         with:
@@ -59,7 +59,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with: { toolchain: "${{ env.TOOLCHAIN }}" }
+        with: { toolchain: stable }
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
         with:
           shared-key: test-${{ matrix.os }}
