@@ -19,7 +19,7 @@ env:
 jobs:
   lint:
     name: fmt + clippy + doc
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -49,8 +49,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # vendor/grok-build needs protoc; Linux is the deployment target.
-        os: [ubuntu-22.04]
+        # vendor/grok-build needs protoc >= 3.15 (proto3 optional); 24.04 ships 3.21. Linux is the deployment target.
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -70,7 +70,7 @@ jobs:
 
   # Builds with the oldest compiler declared in Cargo.toml `rust-version`. Skips when none is declared.
   msrv:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
