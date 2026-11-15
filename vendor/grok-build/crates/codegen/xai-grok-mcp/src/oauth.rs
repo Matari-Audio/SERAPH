@@ -25,14 +25,21 @@ pub(crate) const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Durat
 pub(crate) async fn discover_metadata_bounded(
     manager: &AuthorizationManager,
 ) -> Result<AuthorizationMetadata, AuthError> {
-    tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, manager.discover_metadata())
-        .await
-        .unwrap_or_else(|_| {
-            Err(AuthError::InternalError(format!(
-                "OAuth metadata discovery timed out after {}s",
-                OAUTH_DISCOVERY_TIMEOUT.as_secs()
-            )))
-        })
+    tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, async {
+        let resolved = manager.resolve_metadata().await?;
+        // Synthesized legacy endpoints are not evidence that this server supports OAuth.
+        if !resolved.source.is_discovered() {
+            return Err(AuthError::NoAuthorizationSupport);
+        }
+        Ok(resolved.metadata)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(AuthError::InternalError(format!(
+            "OAuth metadata discovery timed out after {}s",
+            OAUTH_DISCOVERY_TIMEOUT.as_secs()
+        )))
+    })
 }
 
 struct InFlightEntry {
