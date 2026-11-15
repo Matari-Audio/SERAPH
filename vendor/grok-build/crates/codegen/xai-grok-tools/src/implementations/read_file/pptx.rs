@@ -36,6 +36,7 @@ pub(crate) fn extract_pptx_text_from_bytes(bytes: &[u8]) -> Result<String, Strin
     let mut slide_numbers: Vec<u32> = archive
         .file_names()
         .filter_map(|name| {
+            let name = name.ok()?;
             name.strip_prefix("ppt/slides/slide")?
                 .strip_suffix(".xml")?
                 .parse()
@@ -111,9 +112,9 @@ fn extract_drawingml_text(xml: &str) -> Result<String, String> {
     let mut in_text_run = false;
     loop {
         match reader.read_event() {
-            Ok(Event::Start(ref e)) if e.local_name().as_ref() == b"t" => in_text_run = true,
+            Ok(Event::Start(ref e)) if e.local_name().as_ref() == "t" => in_text_run = true,
             Ok(Event::Text(e)) if in_text_run => {
-                let content = e.xml_content().map_err(|e| e.to_string())?;
+                let content = e.xml11_content();
                 text.push_str(&content);
             }
             // quick-xml ≥0.37 emits `&amp;` / `&#233;` as separate events
@@ -122,22 +123,22 @@ fn extract_drawingml_text(xml: &str) -> Result<String, String> {
                 if let Some(ch) = e.resolve_char_ref().map_err(|e| e.to_string())? {
                     text.push(ch);
                 } else {
-                    let name = e.decode().map_err(|e| e.to_string())?;
-                    match quick_xml::escape::resolve_predefined_entity(&name) {
+                    let name = e.as_ref();
+                    match quick_xml::escape::resolve_predefined_entity(name) {
                         Some(resolved) => text.push_str(resolved),
                         // Unknown entity: keep the raw reference visible.
                         None => {
                             text.push('&');
-                            text.push_str(&name);
+                            text.push_str(name);
                             text.push(';');
                         }
                     }
                 }
             }
             Ok(Event::End(ref e)) => match e.local_name().as_ref() {
-                b"t" => in_text_run = false,
+                "t" => in_text_run = false,
                 // End of paragraph: line break.
-                b"p" if !text.is_empty() && !text.ends_with('\n') => text.push('\n'),
+                "p" if !text.is_empty() && !text.ends_with('\n') => text.push('\n'),
                 _ => {}
             },
             Ok(Event::Eof) => break,
@@ -205,6 +206,14 @@ mod tests {
         let bytes = build_zip(&[("ppt/slides/slide1.xml", slide)]);
         let text = extract_pptx_text_from_bytes(&bytes).unwrap();
         assert_eq!(text, "--- Slide 1 ---\nHello & bye");
+    }
+
+    #[test]
+    fn preserves_reference_handling_and_xml11_line_endings() {
+        let slide = "<a:p><a:t>one\u{85}two &#233; &unknown;</a:t></a:p>";
+        let bytes = build_zip(&[("ppt/slides/slide1.xml", slide)]);
+        let text = extract_pptx_text_from_bytes(&bytes).unwrap();
+        assert_eq!(text, "--- Slide 1 ---\none\ntwo é &unknown;");
     }
 
     #[test]
