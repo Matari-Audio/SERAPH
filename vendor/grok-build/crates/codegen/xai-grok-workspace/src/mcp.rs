@@ -37,9 +37,12 @@ impl McpTransport for McpClientTransportAdapter {
         let info = service.peer_info().ok_or_else(|| {
             xai_computer_hub_mcp_adapter::McpError::Transport("no peer info after init".into())
         })?;
+        let server_info = info.server_info.as_ref().ok_or_else(|| {
+            xai_computer_hub_mcp_adapter::McpError::Transport("no server info after init".into())
+        })?;
         Ok(McpServerInfo {
-            name: info.server_info.name.clone(),
-            version: info.server_info.version.clone(),
+            name: server_info.name.clone(),
+            version: server_info.version.clone(),
             capabilities: serde_json::to_value(&info.capabilities).unwrap_or_default(),
         })
     }

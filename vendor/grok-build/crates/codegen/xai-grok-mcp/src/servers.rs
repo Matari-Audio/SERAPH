@@ -18,7 +18,7 @@ use tokio::{
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
+        CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation,
         PaginatedRequestParams,
     },
     service::{
@@ -2653,8 +2653,8 @@ enum PendingTransport {
 }
 
 /// A connected MCP service (rmcp's RunningService wrapped in Arc).
-/// Uses [`GrokClientHandler`] rather than rmcp's default `ClientInfo` handler.
-/// rmcp 2.1 parameterizes `RunningService` over the handler type, and `ClientInfo` is only a `ClientHandler` impl with no notification routing.
+/// Uses [`GrokClientHandler`] rather than rmcp's default `ClientConfig` handler.
+/// rmcp 2.1 parameterizes `RunningService` over the handler type, and `ClientConfig` is only a `ClientHandler` impl with no notification routing.
 /// The custom handler keeps the same protocol behavior (same `get_info`).
 /// It passes `tools/list_changed` / `resources/list_changed` notifications through to the session-actor dispatcher.
 pub type McpService = Arc<RunningService<RoleClient, GrokClientHandler>>;
@@ -3757,7 +3757,7 @@ impl McpClient {
         }
     }
 
-    fn make_client_info(server_name: &str, advertise_elicitation: bool) -> ClientInfo {
+    fn make_client_info(server_name: &str, advertise_elicitation: bool) -> ClientConfig {
         use rmcp::model::{
             ElicitationCapability, FormElicitationCapability, UrlElicitationCapability,
         };
@@ -3779,7 +3779,7 @@ impl McpClient {
                     .with_url(UrlElicitationCapability::new()),
             );
         }
-        ClientInfo::new(
+        ClientConfig::new(
             capabilities,
             Implementation::new(
                 format!("grok-shell-{server_name}"),
@@ -4083,7 +4083,13 @@ impl McpClient {
         match &*guard {
             ClientState::Ready { service, .. } => service
                 .peer_info()
-                .map(|info| McpIcon::from_rmcp_list(info.server_info.icons.clone()))
+                .map(|info| {
+                    McpIcon::from_rmcp_list(
+                        info.server_info
+                            .as_ref()
+                            .and_then(|server| server.icons.clone()),
+                    )
+                })
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
@@ -4715,8 +4721,8 @@ impl McpClient {
 /// rmcp must not see an error from a notification handler or the service loop tears down.
 #[derive(Debug)]
 pub struct GrokClientHandler {
-    /// Static `ClientInfo` returned by [`Self::get_info`]; built once at handshake time and stored to avoid re-allocating per call.
-    info: ClientInfo,
+    /// Static `ClientConfig` returned by [`Self::get_info`]; built once at handshake time and stored to avoid re-allocating per call.
+    info: ClientConfig,
     /// MCP server name this handler is bound to.
     /// Cloned into emitted events so the dispatcher can route per-server.
     server_name: McpServerName,
@@ -4784,13 +4790,25 @@ impl ClientHandler for GrokClientHandler {
         }
     }
 
-    async fn on_url_elicitation_notification_complete(
+    async fn on_custom_notification(
         &self,
-        params: rmcp::model::ElicitationResponseNotificationParam,
+        notification: rmcp::model::CustomNotification,
         _context: NotificationContext<RoleClient>,
     ) {
+        // rmcp 3 routes legacy URL elicitation completion through custom notifications.
+        if notification.method != "notifications/elicitation/complete" {
+            return;
+        }
+        let Some(elicitation_id) = notification
+            .params
+            .as_ref()
+            .and_then(|params| params.get("elicitationId"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
         if !xai_grok_tools::mcp_elicitation::chars_within(
-            &params.elicitation_id,
+            elicitation_id,
             xai_grok_tools::mcp_elicitation::MAX_ELICIT_ID_CHARS,
         ) {
             tracing::warn!(
@@ -4801,11 +4819,11 @@ impl ClientHandler for GrokClientHandler {
         }
         self.emit(McpClientEvent::ElicitationComplete {
             server: self.server_name.clone(),
-            elicitation_id: params.elicitation_id,
+            elicitation_id: elicitation_id.to_owned(),
         });
     }
 
-    fn get_info(&self) -> ClientInfo {
+    fn get_info(&self) -> ClientConfig {
         self.info.clone()
     }
 }

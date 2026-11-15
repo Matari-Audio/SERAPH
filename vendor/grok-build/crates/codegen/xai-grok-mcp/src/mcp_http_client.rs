@@ -157,10 +157,31 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
     async fn get_stream(
         &self,
         uri: Arc<str>,
-        session_id: Arc<str>,
+        session_id: Option<Arc<str>>,
         last_event_id: Option<String>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::default()
+                .max_sse_event_size,
+        )
+        .await
+    }
+
+    async fn get_stream_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
         let plan = {
             let mut st = self.state.lock();
@@ -197,7 +218,14 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
 
         let result = self
             .inner
-            .get_stream(uri, session_id, last_event_id, auth_token, custom_headers)
+            .get_stream_with_max_sse_event_size(
+                uri,
+                session_id,
+                last_event_id,
+                auth_token,
+                custom_headers,
+                max_sse_event_size,
+            )
             .await;
         if result.is_ok() {
             self.state.lock().mark_established(now());
@@ -213,8 +241,36 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        self.post_message_with_max_sse_event_size(
+            uri,
+            message,
+            session_id,
+            auth_token,
+            custom_headers,
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::default()
+                .max_sse_event_size,
+        )
+        .await
+    }
+
+    async fn post_message_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         self.inner
-            .post_message(uri, message, session_id, auth_token, custom_headers)
+            .post_message_with_max_sse_event_size(
+                uri,
+                message,
+                session_id,
+                auth_token,
+                custom_headers,
+                max_sse_event_size,
+            )
             .await
     }
 
@@ -349,7 +405,7 @@ mod tests {
         async fn get_stream(
             &self,
             _uri: Arc<str>,
-            _session_id: Arc<str>,
+            _session_id: Option<Arc<str>>,
             _last_event_id: Option<String>,
             _auth_token: Option<String>,
             _custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -427,7 +483,7 @@ mod tests {
         let stream = client
             .get_stream(
                 "http://mock".into(),
-                "session".into(),
+                Some("session".into()),
                 None,
                 None,
                 HashMap::new(),

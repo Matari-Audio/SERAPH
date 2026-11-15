@@ -145,11 +145,18 @@ impl ModeTracker {
                     // Zero also means the default (1): under the common CSI zero-means-default convention a terminal may pop one entry for `<0u`
                     // Over-counting depth here risks the destructive extra pop at exit
                     let n = parse_decimal(&body[1..]).filter(|&n| n > 0).unwrap_or(1);
-                    let _ = self.kitty_depth.fetch_update(
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                        |depth| Some(depth.saturating_sub(n)),
-                    );
+                    let mut depth = self.kitty_depth.load(Ordering::SeqCst);
+                    loop {
+                        match self.kitty_depth.compare_exchange_weak(
+                            depth,
+                            depth.saturating_sub(n),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(current) => depth = current,
+                        }
+                    }
                 }
                 // `CSI u` restores the cursor, `CSI ? u` queries, and `CSI = .. u` sets flags without pushing; none are stack operations.
                 _ => {}
