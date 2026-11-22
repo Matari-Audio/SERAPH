@@ -274,11 +274,9 @@ impl acp::Agent for SeraphAgent {
                     let browser = options.iter().find(|option| option.id == "browser");
                     if kind == "select"
                         && message == "Select OpenAI Codex login method:"
-                        && browser.is_some()
+                        && let Some(browser) = browser
                     {
-                        auth.answer_prompt(&browser.unwrap().id)
-                            .await
-                            .map_err(acp_error)?;
+                        auth.answer_prompt(&browser.id).await.map_err(acp_error)?;
                     } else if kind == "manual_code"
                         && message.starts_with("Complete login in your browser")
                     {

@@ -22,3 +22,21 @@ fn gauges_saturate_at_zero_and_guards_decrement_exactly_once_on_drop() {
     drop(outer);
     assert_eq!(GAUGE.get(), 0);
 }
+
+#[test]
+fn concurrent_decrements_do_not_lose_updates() {
+    let gauge = ActivityGauge::new();
+    for _ in 0..4000 {
+        gauge.inc();
+    }
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                for _ in 0..400 {
+                    gauge.dec();
+                }
+            });
+        }
+    });
+    assert_eq!(gauge.get(), 800);
+}

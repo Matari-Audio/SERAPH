@@ -120,7 +120,8 @@ mod linux {
         fn new() -> std::io::Result<Self> {
             let raw = unsafe { inotify_init1(libc::O_NONBLOCK | libc::O_CLOEXEC) }?;
             let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-            let fd = AsyncFd::with_interest(owned, Interest::READABLE)?;
+            // SAFETY: OwnedFd keeps this descriptor open and unchanged until AsyncFd is dropped.
+            let fd = unsafe { AsyncFd::register_with_interest(owned, Interest::READABLE) }?;
             Ok(Inotify { fd })
         }
 
