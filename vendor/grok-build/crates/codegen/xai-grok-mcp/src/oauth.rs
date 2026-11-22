@@ -6,7 +6,8 @@ use tokio::sync::{Mutex, oneshot, watch};
 
 use crate::oauth_config::McpOAuthConfig;
 use crate::rmcp::transport::auth::{
-    AuthError, AuthorizationManager, AuthorizationMetadata, OAuthClientConfig,
+    AuthError, AuthorizationManager, AuthorizationMetadataResolution, AuthorizationMetadataSource,
+    OAuthClientConfig,
 };
 
 const MCP_OAUTH_CLIENT_NAME: &str = "Grok";
@@ -24,8 +25,8 @@ pub(crate) const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Durat
 
 pub(crate) async fn discover_metadata_bounded(
     manager: &AuthorizationManager,
-) -> Result<AuthorizationMetadata, AuthError> {
-    tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, manager.discover_metadata())
+) -> Result<AuthorizationMetadataResolution, AuthError> {
+    tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, manager.resolve_metadata())
         .await
         .unwrap_or_else(|_| {
             Err(AuthError::InternalError(format!(
@@ -302,7 +303,7 @@ async fn try_token_refresh(
 /// What one [`ensure_oauth_ready`] pass learned, for callers to consume instead of re-probing.
 pub(crate) struct OauthReadiness {
     /// The bounded discovery outcome; `Ok` means fresh metadata is set on the manager, `Err` kept whatever metadata the manager already held.
-    pub(crate) discovery: Result<(), AuthError>,
+    pub(crate) discovery: Result<AuthorizationMetadataSource, AuthError>,
     /// Whether the oauth client got hydrated from the credential store.
     pub(crate) hydrated: bool,
 }
@@ -314,9 +315,9 @@ pub(crate) async fn ensure_oauth_ready(
     mgr: &mut AuthorizationManager,
 ) -> OauthReadiness {
     let discovery = match discover_metadata_bounded(mgr).await {
-        Ok(metadata) => {
-            mgr.set_metadata(metadata);
-            Ok(())
+        Ok(resolution) => {
+            mgr.set_metadata(resolution.metadata);
+            Ok(resolution.source)
         }
         Err(e) => {
             tracing::warn!(

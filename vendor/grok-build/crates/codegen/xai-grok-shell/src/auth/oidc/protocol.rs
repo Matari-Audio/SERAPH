@@ -996,7 +996,7 @@ mod tests {
             jsonwebtoken::encode(
                 &header,
                 &claims,
-                &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+                &jsonwebtoken::EncodingKey::from_secret(b"test-secret").unwrap(),
             )
             .unwrap()
         }
@@ -1036,7 +1036,7 @@ mod tests {
             jsonwebtoken::encode(
                 &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
                 &claims,
-                &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+                &jsonwebtoken::EncodingKey::from_secret(b"test-secret").unwrap(),
             )
             .unwrap()
         }

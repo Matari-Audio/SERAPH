@@ -962,17 +962,13 @@ async fn run_turn(
     let mut turn_error = None;
 
     loop {
-        enum Next {
-            Event(Result<CodexEvent>),
-            Quit,
-        }
         let next = {
             let event = codex.next_turn_event(thread_id, &turn_id);
             tokio::pin!(event);
             tokio::select! {
-                event = &mut event => Next::Event(event),
+                event = &mut event => Some(event),
                 command = commands.recv() => match command {
-                    Some(UiCommand::Quit) | None => Next::Quit,
+                    Some(UiCommand::Quit) | None => None,
                     Some(_) => {
                         ui.send(UiEvent::Notice("The current turn is still running.".into())).await?;
                         continue;
@@ -981,10 +977,10 @@ async fn run_turn(
             }
         };
         match next {
-            Next::Event(Ok(CodexEvent::AgentMessageDelta(delta))) => {
+            Some(Ok(CodexEvent::AgentMessageDelta(delta))) => {
                 ui.send(UiEvent::AssistantDelta(delta)).await?
             }
-            Next::Event(Ok(CodexEvent::ToolCall(call))) => {
+            Some(Ok(CodexEvent::ToolCall(call))) => {
                 enum ToolOutcome {
                     Complete(Result<String>),
                     Quit,
@@ -1037,8 +1033,8 @@ async fn run_turn(
                     )
                     .await?;
             }
-            Next::Event(Ok(CodexEvent::TurnError(error))) => turn_error = Some(error),
-            Next::Event(Ok(CodexEvent::TurnCompleted(turn))) => {
+            Some(Ok(CodexEvent::TurnError(error))) => turn_error = Some(error),
+            Some(Ok(CodexEvent::TurnCompleted(turn))) => {
                 match turn.get("status").and_then(Value::as_str) {
                     Some("completed") => ui.send(UiEvent::AssistantDone).await?,
                     Some("interrupted") => {
@@ -1055,8 +1051,8 @@ async fn run_turn(
                 }
                 return Ok(false);
             }
-            Next::Event(Err(error)) => return Err(error),
-            Next::Quit => {
+            Some(Err(error)) => return Err(error),
+            None => {
                 interrupt_turn(codex, thread_id, &turn_id).await?;
                 return Ok(true);
             }

@@ -272,8 +272,11 @@ impl SessionActor {
             &event_writer,
             crate::session::mcp_servers::OauthInteractivity::Interactive,
             self.tool_context.process_scope.as_ref(),
-        )
-        .with_oauth_discovery(discovery);
+        );
+        let ctx = match discovery {
+            McpOauthDiscovery::Network => ctx.for_explicit_oauth_login(),
+            McpOauthDiscovery::Disk => ctx,
+        };
         let new_client = crate::session::mcp_servers::start_mcp_server(
             server_config,
             Some(cwd),

@@ -18,7 +18,7 @@ use tokio::{
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
+        CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation,
         PaginatedRequestParams,
     },
     service::{
@@ -1943,16 +1943,23 @@ impl OauthInteractivity {
     }
 }
 
+struct LegacyOauthCandidate {
+    manager: Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>,
+    observed: crate::credentials::ObservedAccessToken,
+}
+
 enum OauthProbeOutcome {
     Resolved(HttpAuthDecision),
-    Inconclusive,
+    Inconclusive {
+        legacy: Option<LegacyOauthCandidate>,
+    },
 }
 
 impl OauthProbeOutcome {
     fn on_probe_failure(mode: OauthInteractivity) -> Self {
         match mode {
             OauthInteractivity::Interactive => Self::Resolved(HttpAuthDecision::NoOauthSupport),
-            OauthInteractivity::NonInteractive => Self::Inconclusive,
+            OauthInteractivity::NonInteractive => Self::Inconclusive { legacy: None },
         }
     }
 }
@@ -2035,7 +2042,15 @@ async fn discover_and_prepare_auth(
     }
 
     match ready.discovery {
-        Ok(()) => {
+        // Synthesized legacy endpoints do not establish that the server requires OAuth.
+        // Confirm whether the server accepts an unauthenticated request before deciding.
+        Ok(source) if !source.is_discovered() => OauthProbeOutcome::Inconclusive {
+            legacy: (mode == OauthInteractivity::Interactive).then(|| LegacyOauthCandidate {
+                manager: Arc::new(tokio::sync::Mutex::new(manager)),
+                observed,
+            }),
+        },
+        Ok(_) => {
             if mode == OauthInteractivity::NonInteractive {
                 tracing::warn!(
                     server = server_name,
@@ -2172,24 +2187,51 @@ async fn decide_http_auth_over_network(
     };
     match outcome {
         OauthProbeOutcome::Resolved(decision) => decision,
-        OauthProbeOutcome::Inconclusive => {
-            let (verdict, decision) = match probe_anonymous_access(server_name, url, headers).await
-            {
-                AnonymousAccess::Accepted => {
+        OauthProbeOutcome::Inconclusive { legacy } => {
+            let (verdict, decision) = match (
+                probe_anonymous_access(server_name, url, headers).await,
+                legacy,
+            ) {
+                (AnonymousAccess::Accepted, Some(LegacyOauthCandidate { manager, observed }))
+                    if ctx.explicit_login =>
+                {
+                    tracing::info!(
+                        server = server_name,
+                        "Using legacy OAuth endpoints for explicit login"
+                    );
+                    (
+                        "accepted",
+                        HttpAuthDecision::ManagerReady { manager, observed },
+                    )
+                }
+                (AnonymousAccess::Accepted, _) => {
                     tracing::info!(
                         server = server_name,
                         "OAuth discovery was inconclusive but the server accepts unauthenticated requests; connecting without auth"
                     );
                     ("accepted", HttpAuthDecision::NoOauthSupport)
                 }
-                AnonymousAccess::AuthChallenged => {
+                (
+                    AnonymousAccess::AuthChallenged,
+                    Some(LegacyOauthCandidate { manager, observed }),
+                ) => {
+                    tracing::info!(
+                        server = server_name,
+                        "Server challenges unauthenticated requests; using legacy OAuth endpoints"
+                    );
+                    (
+                        "auth_challenged",
+                        HttpAuthDecision::ManagerReady { manager, observed },
+                    )
+                }
+                (AnonymousAccess::AuthChallenged, None) => {
                     tracing::warn!(
                         server = server_name,
                         "OAuth discovery was inconclusive and the server challenges unauthenticated requests; authenticate in TUI or set an Authorization header"
                     );
                     ("auth_challenged", HttpAuthDecision::NeedsInteractiveLogin)
                 }
-                AnonymousAccess::Unreachable => {
+                (AnonymousAccess::Unreachable, _) => {
                     tracing::warn!(
                         server = server_name,
                         "OAuth discovery was inconclusive and the anonymous-access probe could not reach the server; failing closed as unreachable (retryable)"
@@ -2653,8 +2695,8 @@ enum PendingTransport {
 }
 
 /// A connected MCP service (rmcp's RunningService wrapped in Arc).
-/// Uses [`GrokClientHandler`] rather than rmcp's default `ClientInfo` handler.
-/// rmcp 2.1 parameterizes `RunningService` over the handler type, and `ClientInfo` is only a `ClientHandler` impl with no notification routing.
+/// Uses [`GrokClientHandler`] rather than rmcp's default `ClientConfig` handler.
+/// rmcp parameterizes `RunningService` over the handler type, and `ClientConfig` is only a `ClientHandler` impl with no notification routing.
 /// The custom handler keeps the same protocol behavior (same `get_info`).
 /// It passes `tools/list_changed` / `resources/list_changed` notifications through to the session-actor dispatcher.
 pub type McpService = Arc<RunningService<RoleClient, GrokClientHandler>>;
@@ -3757,7 +3799,7 @@ impl McpClient {
         }
     }
 
-    fn make_client_info(server_name: &str, advertise_elicitation: bool) -> ClientInfo {
+    fn make_client_info(server_name: &str, advertise_elicitation: bool) -> ClientConfig {
         use rmcp::model::{
             ElicitationCapability, FormElicitationCapability, UrlElicitationCapability,
         };
@@ -3779,15 +3821,14 @@ impl McpClient {
                     .with_url(UrlElicitationCapability::new()),
             );
         }
-        ClientInfo::new(
+        ClientConfig::new(
             capabilities,
             Implementation::new(
                 format!("grok-shell-{server_name}"),
                 xai_grok_version::VERSION.to_string(),
             ),
         )
-        // This pin currently equals rmcp 2.1 LATEST
-        // The explicit setter must remain so a future rmcp bump cannot silently move the wire (including to 2026-07-28)
+        // Keep the existing protocol negotiation version when updating rmcp.
         .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25)
     }
 
@@ -4083,7 +4124,13 @@ impl McpClient {
         match &*guard {
             ClientState::Ready { service, .. } => service
                 .peer_info()
-                .map(|info| McpIcon::from_rmcp_list(info.server_info.icons.clone()))
+                .map(|info| {
+                    McpIcon::from_rmcp_list(
+                        info.server_info
+                            .as_ref()
+                            .and_then(|server| server.icons.clone()),
+                    )
+                })
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
@@ -4413,6 +4460,7 @@ pub struct McpSpawnCtx<'a> {
     pub(crate) mode: OauthInteractivity,
     pub(crate) scope: Option<&'a ProcessScope>,
     pub(crate) discovery: McpOauthDiscovery,
+    pub(crate) explicit_login: bool,
 }
 
 impl<'a> McpSpawnCtx<'a> {
@@ -4428,6 +4476,7 @@ impl<'a> McpSpawnCtx<'a> {
             mode,
             scope,
             discovery: McpOauthDiscovery::Disk,
+            explicit_login: false,
         }
     }
 
@@ -4438,12 +4487,23 @@ impl<'a> McpSpawnCtx<'a> {
             mode: OauthInteractivity::Interactive,
             scope: None,
             discovery: McpOauthDiscovery::Disk,
+            explicit_login: false,
         }
     }
 
     #[must_use]
     pub fn with_oauth_discovery(mut self, discovery: McpOauthDiscovery) -> Self {
         self.discovery = discovery;
+        self.explicit_login = false;
+        self
+    }
+
+    /// Probe for OAuth for an explicit sign-in action, keeping a legacy candidate
+    /// even if the anonymous probe receives a reply without an auth challenge.
+    #[must_use]
+    pub fn for_explicit_oauth_login(mut self) -> Self {
+        self.discovery = McpOauthDiscovery::Network;
+        self.explicit_login = true;
         self
     }
 }
@@ -4700,8 +4760,7 @@ impl McpClient {
 ///
 /// ## RPIT, not `#[async_trait]`
 ///
-/// rmcp 2.1's [`ClientHandler`] declares its async methods as return-position `impl Future`.
-/// See `~/.cargo/registry/src/.../rmcp-2.1.0/src/handler/client.rs`, lines 202-217.
+/// rmcp’s [`ClientHandler`] declares its async methods as return-position `impl Future`.
 /// Applying `#[async_trait]` here would produce methods whose signature mismatches the trait, and the impl would not satisfy the bound.
 /// The macro path is also unnecessary: the trait already supports `async fn` syntax indirectly via `impl Future<Output = ()> + Send + '_`.
 ///
@@ -4715,8 +4774,8 @@ impl McpClient {
 /// rmcp must not see an error from a notification handler or the service loop tears down.
 #[derive(Debug)]
 pub struct GrokClientHandler {
-    /// Static `ClientInfo` returned by [`Self::get_info`]; built once at handshake time and stored to avoid re-allocating per call.
-    info: ClientInfo,
+    /// Static `ClientConfig` returned by [`Self::get_info`]; built once at handshake time and stored to avoid re-allocating per call.
+    info: ClientConfig,
     /// MCP server name this handler is bound to.
     /// Cloned into emitted events so the dispatcher can route per-server.
     server_name: McpServerName,
@@ -4743,7 +4802,7 @@ impl GrokClientHandler {
 impl ClientHandler for GrokClientHandler {
     // NOTE: `async fn` here is sugar for the trait's `-> impl Future<Output = ()> + Send + '_`
     // We INTENTIONALLY do not use `#[async_trait]`
-    // rmcp 2.1's `ClientHandler` declares its notification methods as return-position `impl Future`
+    // rmcp's `ClientHandler` declares its notification methods as return-position `impl Future`
     // async_trait would produce a different (incompatible) signature.
     // See the [`GrokClientHandler`] doc-comment for the full RPIT contract
     async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
@@ -4784,13 +4843,25 @@ impl ClientHandler for GrokClientHandler {
         }
     }
 
-    async fn on_url_elicitation_notification_complete(
+    async fn on_custom_notification(
         &self,
-        params: rmcp::model::ElicitationResponseNotificationParam,
+        notification: rmcp::model::CustomNotification,
         _context: NotificationContext<RoleClient>,
     ) {
+        // rmcp 3 delivers the legacy completion notification through this hook.
+        if notification.method != "notifications/elicitation/complete" {
+            return;
+        }
+        let Some(elicitation_id) = notification
+            .params
+            .as_ref()
+            .and_then(|params| params.get("elicitationId"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
         if !xai_grok_tools::mcp_elicitation::chars_within(
-            &params.elicitation_id,
+            elicitation_id,
             xai_grok_tools::mcp_elicitation::MAX_ELICIT_ID_CHARS,
         ) {
             tracing::warn!(
@@ -4801,11 +4872,11 @@ impl ClientHandler for GrokClientHandler {
         }
         self.emit(McpClientEvent::ElicitationComplete {
             server: self.server_name.clone(),
-            elicitation_id: params.elicitation_id,
+            elicitation_id: elicitation_id.to_owned(),
         });
     }
 
-    fn get_info(&self) -> ClientInfo {
+    fn get_info(&self) -> ClientConfig {
         self.info.clone()
     }
 }

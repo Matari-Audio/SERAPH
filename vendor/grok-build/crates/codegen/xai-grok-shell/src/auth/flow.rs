@@ -1571,7 +1571,7 @@ mod tests {
                 "principal_id": principal_id,
                 "exp": 9999999999u64,
             }),
-            &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+            &jsonwebtoken::EncodingKey::from_secret(b"test-secret").unwrap(),
         )
         .unwrap()
     }
