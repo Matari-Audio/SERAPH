@@ -66,7 +66,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: runner.os == 'Linux' && env.APT_PACKAGES != ''
         run: sudo apt-get update && sudo apt-get install -y $APT_PACKAGES
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: nextest
       - run: cargo nextest run --workspace --all-features --no-tests=pass
