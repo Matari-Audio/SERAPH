@@ -3160,6 +3160,44 @@ async fn inconclusive_oauth_probe_stays_fail_closed_on_auth_challenge() {
     );
 }
 
+#[tokio::test]
+async fn legacy_oauth_challenge_prepares_interactive_login_and_blocks_headless() {
+    use axum::http::StatusCode;
+
+    // Discovery gets a finite response and finds no well-known metadata.
+    // Unlike the SSE fixtures, this exercises synthesized endpoints, not a timeout.
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::get(|| async { StatusCode::METHOD_NOT_ALLOWED })
+            .post(|| async { StatusCode::UNAUTHORIZED }),
+    );
+    let url = spawn_test_http_server(app).await;
+    let event_writer = xai_grok_session_events::EventWriter::noop();
+
+    let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
+    let client = start_mcp_server(make_http_server("fake", &url), None, None, None, &ctx)
+        .await
+        .expect("interactive client can be prepared for legacy OAuth");
+    {
+        let mut manager = client
+            .auth_manager
+            .as_ref()
+            .expect("the re-auth trigger needs an OAuth manager")
+            .lock()
+            .await;
+        manager.configure_client_id("legacy-test-client").unwrap();
+        let authorization_url = manager.get_authorization_url(&[]).await.unwrap();
+        assert_eq!(
+            url::Url::parse(&authorization_url).unwrap().path(),
+            "/authorize"
+        );
+    }
+
+    let ctx = probe_ctx(&event_writer, OauthInteractivity::NonInteractive);
+    let result = start_mcp_server(make_http_server("fake", &url), None, None, None, &ctx).await;
+    assert!(matches!(result, Err(McpError::AuthRequired { .. })));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inconclusive_oauth_probe_unreachable_fails_closed() {
     use axum::response::IntoResponse;

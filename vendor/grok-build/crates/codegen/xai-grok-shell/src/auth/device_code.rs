@@ -599,7 +599,7 @@ pub(crate) mod tests {
             access_token: jsonwebtoken::encode(
                 &header,
                 &claims,
-                &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+                &jsonwebtoken::EncodingKey::from_secret(b"test-secret").unwrap(),
             )
             .unwrap(),
             refresh_token: Some("refresh-token".to_owned()),
@@ -639,7 +639,7 @@ pub(crate) mod tests {
             access_token: jsonwebtoken::encode(
                 &header,
                 &claims,
-                &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+                &jsonwebtoken::EncodingKey::from_secret(b"test-secret").unwrap(),
             )
             .unwrap(),
             refresh_token: Some("refresh-token".to_owned()),

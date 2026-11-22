@@ -380,7 +380,7 @@ async fn provider_expiry_source_precedence() {
         jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
             &serde_json::json!({ "exp": exp }),
-            &jsonwebtoken::EncodingKey::from_secret(b"test"),
+            &jsonwebtoken::EncodingKey::from_secret(b"test").unwrap(),
         )
         .unwrap()
     }

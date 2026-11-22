@@ -1943,16 +1943,23 @@ impl OauthInteractivity {
     }
 }
 
+struct LegacyOauthCandidate {
+    manager: Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>,
+    observed: crate::credentials::ObservedAccessToken,
+}
+
 enum OauthProbeOutcome {
     Resolved(HttpAuthDecision),
-    Inconclusive,
+    Inconclusive {
+        legacy: Option<LegacyOauthCandidate>,
+    },
 }
 
 impl OauthProbeOutcome {
     fn on_probe_failure(mode: OauthInteractivity) -> Self {
         match mode {
             OauthInteractivity::Interactive => Self::Resolved(HttpAuthDecision::NoOauthSupport),
-            OauthInteractivity::NonInteractive => Self::Inconclusive,
+            OauthInteractivity::NonInteractive => Self::Inconclusive { legacy: None },
         }
     }
 }
@@ -2037,7 +2044,12 @@ async fn discover_and_prepare_auth(
     match ready.discovery {
         // Synthesized legacy endpoints do not establish that the server requires OAuth.
         // Confirm whether the server accepts an unauthenticated request before deciding.
-        Ok(source) if !source.is_discovered() => OauthProbeOutcome::Inconclusive,
+        Ok(source) if !source.is_discovered() => OauthProbeOutcome::Inconclusive {
+            legacy: (mode == OauthInteractivity::Interactive).then(|| LegacyOauthCandidate {
+                manager: Arc::new(tokio::sync::Mutex::new(manager)),
+                observed,
+            }),
+        },
         Ok(_) => {
             if mode == OauthInteractivity::NonInteractive {
                 tracing::warn!(
@@ -2175,24 +2187,39 @@ async fn decide_http_auth_over_network(
     };
     match outcome {
         OauthProbeOutcome::Resolved(decision) => decision,
-        OauthProbeOutcome::Inconclusive => {
-            let (verdict, decision) = match probe_anonymous_access(server_name, url, headers).await
-            {
-                AnonymousAccess::Accepted => {
+        OauthProbeOutcome::Inconclusive { legacy } => {
+            let (verdict, decision) = match (
+                probe_anonymous_access(server_name, url, headers).await,
+                legacy,
+            ) {
+                (AnonymousAccess::Accepted, _) => {
                     tracing::info!(
                         server = server_name,
                         "OAuth discovery was inconclusive but the server accepts unauthenticated requests; connecting without auth"
                     );
                     ("accepted", HttpAuthDecision::NoOauthSupport)
                 }
-                AnonymousAccess::AuthChallenged => {
+                (
+                    AnonymousAccess::AuthChallenged,
+                    Some(LegacyOauthCandidate { manager, observed }),
+                ) => {
+                    tracing::info!(
+                        server = server_name,
+                        "Server challenges unauthenticated requests; using legacy OAuth endpoints"
+                    );
+                    (
+                        "auth_challenged",
+                        HttpAuthDecision::ManagerReady { manager, observed },
+                    )
+                }
+                (AnonymousAccess::AuthChallenged, None) => {
                     tracing::warn!(
                         server = server_name,
                         "OAuth discovery was inconclusive and the server challenges unauthenticated requests; authenticate in TUI or set an Authorization header"
                     );
                     ("auth_challenged", HttpAuthDecision::NeedsInteractiveLogin)
                 }
-                AnonymousAccess::Unreachable => {
+                (AnonymousAccess::Unreachable, _) => {
                     tracing::warn!(
                         server = server_name,
                         "OAuth discovery was inconclusive and the anonymous-access probe could not reach the server; failing closed as unreachable (retryable)"
