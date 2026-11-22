@@ -52,7 +52,7 @@ globset = { workspace = true }
 kanal = "0.1"
 loom = { workspace = true, optional = true }
 regex = { workspace = true }
-# rmcp 2.1 + reqwest 0.13 are quarantined inside `xai-grok-mcp`. The remaining
+# rmcp 3 + reqwest 0.13 are quarantined inside `xai-grok-mcp`. The remaining
 # MCP code in this crate (extensions/mcp.rs, mcp_doctor.rs) reaches rmcp model
 # types via `xai_grok_mcp::rmcp::model::*`. reqwest 0.13 is a private impl
 # detail of xai-grok-mcp::servers; shell never sees it. Every HTTP call site
@@ -121,7 +121,7 @@ moka = { workspace = true, features = ["future"] }
 dhat = { workspace = true, optional = true }
 base64 = { workspace = true }
 hmac = { workspace = true }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "12", features = ["rust_crypto"] }
 sha2 = { workspace = true }
 rand = { workspace = true }
 strum = { workspace = true }

@@ -1,8 +1,6 @@
 //! MCP HTTP client wrapper that throttles SSE reconnects with exponential backoff, working around rmcp's zero-backoff reconnect loop.
 //! When an established SSE stream errors, rmcp re-issues the `GET` immediately with its retry counter reset to 0.
 //! It never consults its `SseRetryPolicy`; only connect failures and graceful EOF consult it.
-//! We ship rmcp 2.1; still unfixed upstream as of rmcp 2.1.0:
-//! <https://github.com/modelcontextprotocol/rust-sdk/blob/rmcp-v2.1.0/crates/rmcp/src/transport/common/client_side_sse.rs#L250-L261>
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +11,7 @@ use http::{HeaderName, HeaderValue};
 use rmcp::model::ClientJsonRpcMessage;
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
+    StreamableHttpResponseLimits,
 };
 use sse_stream::{Error as SseError, Sse};
 
@@ -157,10 +156,30 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
     async fn get_stream(
         &self,
         uri: Arc<str>,
-        session_id: Arc<str>,
+        session_id: Option<Arc<str>>,
         last_event_id: Option<String>,
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
+            StreamableHttpResponseLimits::default().max_sse_event_size,
+        )
+        .await
+    }
+
+    async fn get_stream_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
         let plan = {
             let mut st = self.state.lock();
@@ -197,7 +216,14 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
 
         let result = self
             .inner
-            .get_stream(uri, session_id, last_event_id, auth_token, custom_headers)
+            .get_stream_with_max_sse_event_size(
+                uri,
+                session_id,
+                last_event_id,
+                auth_token,
+                custom_headers,
+                max_sse_event_size,
+            )
             .await;
         if result.is_ok() {
             self.state.lock().mark_established(now());
@@ -215,6 +241,27 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         self.inner
             .post_message(uri, message, session_id, auth_token, custom_headers)
+            .await
+    }
+
+    async fn post_message_with_response_limits(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+        limits: StreamableHttpResponseLimits,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        self.inner
+            .post_message_with_response_limits(
+                uri,
+                message,
+                session_id,
+                auth_token,
+                custom_headers,
+                limits,
+            )
             .await
     }
 
@@ -340,8 +387,10 @@ mod tests {
     }
 
     /// Inner client whose streams always succeed and end immediately, simulating rapid stream deaths.
-    #[derive(Clone)]
-    struct MockInner;
+    #[derive(Clone, Default)]
+    struct MockInner {
+        response_limits: Arc<parking_lot::Mutex<Option<StreamableHttpResponseLimits>>>,
+    }
 
     impl StreamableHttpClient for MockInner {
         type Error = std::io::Error;
@@ -349,7 +398,7 @@ mod tests {
         async fn get_stream(
             &self,
             _uri: Arc<str>,
-            _session_id: Arc<str>,
+            _session_id: Option<Arc<str>>,
             _last_event_id: Option<String>,
             _auth_token: Option<String>,
             _custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -369,6 +418,19 @@ mod tests {
             unimplemented!("not used by these tests")
         }
 
+        async fn post_message_with_response_limits(
+            &self,
+            _uri: Arc<str>,
+            _message: ClientJsonRpcMessage,
+            _session_id: Option<Arc<str>>,
+            _auth_token: Option<String>,
+            _custom_headers: HashMap<HeaderName, HeaderValue>,
+            limits: StreamableHttpResponseLimits,
+        ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+            *self.response_limits.lock() = Some(limits);
+            Ok(StreamableHttpPostResponse::Accepted)
+        }
+
         async fn delete_session(
             &self,
             _uri: Arc<str>,
@@ -378,6 +440,38 @@ mod tests {
         ) -> Result<(), StreamableHttpError<Self::Error>> {
             unimplemented!("not used by these tests")
         }
+    }
+
+    #[tokio::test]
+    async fn forwards_transport_response_limits_to_inner_client() {
+        use rmcp::model::{ClientRequest, PingRequest, RequestId};
+
+        let inner = MockInner::default();
+        let client = McpHttpClient::new(inner.clone(), "mock-server", WarnBudget::default());
+        let mut limits = StreamableHttpResponseLimits::default();
+        limits.max_sse_event_size = 123;
+        limits.max_json_response_size = 456;
+        limits.max_error_response_size = 789;
+
+        client
+            .post_message_with_response_limits(
+                "http://mock".into(),
+                ClientJsonRpcMessage::request(
+                    ClientRequest::PingRequest(PingRequest::default()),
+                    RequestId::Number(1),
+                ),
+                None,
+                None,
+                HashMap::new(),
+                limits,
+            )
+            .await
+            .expect("mock accepted the request");
+
+        let forwarded = inner.response_limits.lock().expect("limits were forwarded");
+        assert_eq!(forwarded.max_sse_event_size, 123);
+        assert_eq!(forwarded.max_json_response_size, 456);
+        assert_eq!(forwarded.max_error_response_size, 789);
     }
 
     /// Counts this module's warn events and records each debug event's `suppressed_warn` field.
@@ -427,7 +521,7 @@ mod tests {
         let stream = client
             .get_stream(
                 "http://mock".into(),
-                "session".into(),
+                Some("session".into()),
                 None,
                 None,
                 HashMap::new(),
@@ -445,7 +539,7 @@ mod tests {
         let capture = LogCapture::default();
         let _guard = tracing::subscriber::set_default(capture.clone());
 
-        let client = McpHttpClient::new(MockInner, "mock-server", WarnBudget::default());
+        let client = McpHttpClient::new(MockInner::default(), "mock-server", WarnBudget::default());
         // Attempts 0 and 1 are unthrottled; attempt 2 warns; attempt 3 is debug.
         for _ in 0..4 {
             drive_once(&client).await;
