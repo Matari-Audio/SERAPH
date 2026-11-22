@@ -2192,6 +2192,18 @@ async fn decide_http_auth_over_network(
                 probe_anonymous_access(server_name, url, headers).await,
                 legacy,
             ) {
+                (AnonymousAccess::Accepted, Some(LegacyOauthCandidate { manager, observed }))
+                    if ctx.explicit_login =>
+                {
+                    tracing::info!(
+                        server = server_name,
+                        "Using legacy OAuth endpoints for explicit login"
+                    );
+                    (
+                        "accepted",
+                        HttpAuthDecision::ManagerReady { manager, observed },
+                    )
+                }
                 (AnonymousAccess::Accepted, _) => {
                     tracing::info!(
                         server = server_name,
@@ -4448,6 +4460,7 @@ pub struct McpSpawnCtx<'a> {
     pub(crate) mode: OauthInteractivity,
     pub(crate) scope: Option<&'a ProcessScope>,
     pub(crate) discovery: McpOauthDiscovery,
+    pub(crate) explicit_login: bool,
 }
 
 impl<'a> McpSpawnCtx<'a> {
@@ -4463,6 +4476,7 @@ impl<'a> McpSpawnCtx<'a> {
             mode,
             scope,
             discovery: McpOauthDiscovery::Disk,
+            explicit_login: false,
         }
     }
 
@@ -4473,12 +4487,23 @@ impl<'a> McpSpawnCtx<'a> {
             mode: OauthInteractivity::Interactive,
             scope: None,
             discovery: McpOauthDiscovery::Disk,
+            explicit_login: false,
         }
     }
 
     #[must_use]
     pub fn with_oauth_discovery(mut self, discovery: McpOauthDiscovery) -> Self {
         self.discovery = discovery;
+        self.explicit_login = false;
+        self
+    }
+
+    /// Probe for OAuth for an explicit sign-in action, keeping a legacy candidate
+    /// even if the anonymous probe receives a reply without an auth challenge.
+    #[must_use]
+    pub fn for_explicit_oauth_login(mut self) -> Self {
+        self.discovery = McpOauthDiscovery::Network;
+        self.explicit_login = true;
         self
     }
 }

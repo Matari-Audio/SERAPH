@@ -3048,6 +3048,7 @@ fn probe_ctx<'a>(
         mode,
         scope: None,
         discovery: McpOauthDiscovery::Network,
+        explicit_login: false,
     }
 }
 
@@ -3196,6 +3197,49 @@ async fn legacy_oauth_challenge_prepares_interactive_login_and_blocks_headless()
     let ctx = probe_ctx(&event_writer, OauthInteractivity::NonInteractive);
     let result = start_mcp_server(make_http_server("fake", &url), None, None, None, &ctx).await;
     assert!(matches!(result, Err(McpError::AuthRequired { .. })));
+}
+
+#[tokio::test]
+async fn explicit_legacy_oauth_login_survives_bad_request_probe() {
+    use axum::http::StatusCode;
+
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::get(|| async { StatusCode::METHOD_NOT_ALLOWED }).post(
+            |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                if body["method"] == "initialize" {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            },
+        ),
+    );
+    let url = spawn_test_http_server(app).await;
+    let event_writer = xai_grok_session_events::EventWriter::noop();
+    let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
+
+    let client = start_mcp_server(make_http_server("fake", &url), None, None, None, &ctx)
+        .await
+        .expect("ordinary startup can still try connecting without OAuth");
+    assert!(!client.has_auth());
+
+    let ctx = ctx.for_explicit_oauth_login();
+    let client = start_mcp_server(make_http_server("fake", &url), None, None, None, &ctx)
+        .await
+        .expect("explicit login can prepare legacy OAuth despite the 400 probe response");
+    let mut manager = client
+        .auth_manager
+        .as_ref()
+        .expect("OAuth manager")
+        .lock()
+        .await;
+    manager.configure_client_id("legacy-test-client").unwrap();
+    let authorization_url = manager.get_authorization_url(&[]).await.unwrap();
+    assert_eq!(
+        url::Url::parse(&authorization_url).unwrap().path(),
+        "/authorize"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
